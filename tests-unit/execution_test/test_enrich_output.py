@@ -1,0 +1,184 @@
+"""Tests for enrich_output_with_assets in comfy_execution/asset_enrichment.py."""
+import os
+import types
+import unittest
+from unittest.mock import MagicMock, patch
+
+
+def _make_args(enable_assets: bool):
+    a = types.SimpleNamespace()
+    a.enable_assets = enable_assets
+    return a
+
+
+def _make_db_ref(ref_id="ref-id-1", name="a.png", asset_hash="blake3:abc123", size=1024, mime="image/png"):
+    ref = MagicMock()
+    ref.id = ref_id
+    ref.name = name
+    ref.asset.hash = asset_hash
+    ref.asset.size_bytes = size
+    ref.asset.mime_type = mime
+    return ref
+
+
+def _make_register_result(ref_id="ref-id-2", name="b.png", asset_hash="blake3:def456", size=2048, mime="image/png"):
+    result = MagicMock()
+    result.ref.id = ref_id
+    result.ref.name = name
+    result.asset.hash = asset_hash
+    result.asset.size_bytes = size
+    result.asset.mime_type = mime
+    return result
+
+
+def _call(output_ui, *, enable_assets=True, file_exists=True, db_ref=None, register_result=None, directory="/output"):
+    fake_session_cm = MagicMock()
+    fake_session_cm.__enter__ = MagicMock(return_value=MagicMock())
+    fake_session_cm.__exit__ = MagicMock(return_value=False)
+
+    mocked_modules = {
+        "comfy.cli_args": MagicMock(args=_make_args(enable_assets)),
+        "folder_paths": MagicMock(get_directory_by_type=MagicMock(return_value=directory)),
+        "app.assets.services.ingest": MagicMock(
+            register_file_in_place=MagicMock(return_value=register_result or _make_register_result()),
+            DependencyMissingError=type("DependencyMissingError", (Exception,), {}),
+        ),
+        "app.assets.database.queries.asset_reference": MagicMock(
+            get_reference_by_file_path=MagicMock(return_value=db_ref or _make_db_ref()),
+        ),
+        "app.database.db": MagicMock(create_session=MagicMock(return_value=fake_session_cm)),
+    }
+
+    with patch.dict("sys.modules", mocked_modules), \
+         patch("os.path.abspath", side_effect=lambda p: p), \
+         patch("os.path.isfile", return_value=file_exists), \
+         patch("os.path.join", side_effect=os.path.join):
+        import importlib
+        import comfy_execution.asset_enrichment as mod
+        importlib.reload(mod)
+        return mod.enrich_output_with_assets(output_ui)
+
+
+class TestEnrichOutputWithAssets(unittest.TestCase):
+
+    def test_disabled_returns_unchanged(self):
+        output = {"images": [{"filename": "a.png", "subfolder": "", "type": "output"}]}
+        result = _call(output, enable_assets=False)
+        self.assertNotIn("id", result["images"][0])
+
+    def test_non_list_value_passed_through(self):
+        output = {"text": "hello"}
+        result = _call(output)
+        self.assertEqual(result["text"], "hello")
+
+    def test_entry_without_filename_unchanged(self):
+        output = {"latent": [{"subfolder": "", "type": "output"}]}
+        result = _call(output)
+        self.assertNotIn("id", result["latent"][0])
+
+    def test_entry_without_type_unchanged(self):
+        output = {"data": [{"filename": "a.png", "subfolder": ""}]}
+        result = _call(output)
+        self.assertNotIn("id", result["data"][0])
+
+    def test_file_not_on_disk_unchanged(self):
+        output = {"images": [{"filename": "missing.png", "subfolder": "", "type": "output"}]}
+        result = _call(output, file_exists=False)
+        self.assertNotIn("id", result["images"][0])
+
+    def test_unknown_type_returns_none_directory_unchanged(self):
+        output = {"images": [{"filename": "a.png", "subfolder": "", "type": "unknown"}]}
+        result = _call(output, directory=None)
+        self.assertNotIn("id", result["images"][0])
+
+    def test_db_hit_injects_from_db(self):
+        db_ref = _make_db_ref(ref_id="db-ref", name="from-db.png", asset_hash="blake3:fromdb", size=512)
+        output = {"images": [{"filename": "a.png", "subfolder": "", "type": "output"}]}
+        result = _call(output, db_ref=db_ref)
+        img = result["images"][0]
+        self.assertEqual(img["id"], "db-ref")
+        self.assertEqual(img["asset_hash"], "blake3:fromdb")
+        self.assertEqual(img["size"], 512)
+
+    def test_db_miss_falls_back_to_register(self):
+        no_hash_ref = _make_db_ref(asset_hash=None)
+        reg = _make_register_result(ref_id="inline-ref", asset_hash="blake3:inline", size=999)
+        output = {"images": [{"filename": "new.png", "subfolder": "", "type": "output"}]}
+        result = _call(output, db_ref=no_hash_ref, register_result=reg)
+        img = result["images"][0]
+        self.assertEqual(img["id"], "inline-ref")
+        self.assertEqual(img["asset_hash"], "blake3:inline")
+        self.assertEqual(img["size"], 999)
+
+    def test_original_entry_not_mutated(self):
+        orig = {"filename": "a.png", "subfolder": "", "type": "output"}
+        output = {"images": [orig]}
+        _call(output)
+        self.assertNotIn("id", orig)
+
+    def test_enrichment_error_does_not_block_sibling_entries(self):
+        call_count = [0]
+        good_reg = _make_register_result(ref_id="good-ref", asset_hash="blake3:good")
+        no_hash_ref = _make_db_ref(asset_hash=None)
+
+        def register_side_effect(abs_path, name, tags):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise RuntimeError("boom")
+            return good_reg
+
+        fake_session_cm = MagicMock()
+        fake_session_cm.__enter__ = MagicMock(return_value=MagicMock())
+        fake_session_cm.__exit__ = MagicMock(return_value=False)
+
+        mocked_modules = {
+            "comfy.cli_args": MagicMock(args=_make_args(True)),
+            "folder_paths": MagicMock(get_directory_by_type=MagicMock(return_value="/output")),
+            "app.assets.services.ingest": MagicMock(
+                register_file_in_place=register_side_effect,
+                DependencyMissingError=type("DependencyMissingError", (Exception,), {}),
+            ),
+            "app.assets.database.queries.asset_reference": MagicMock(
+                get_reference_by_file_path=MagicMock(return_value=no_hash_ref),
+            ),
+            "app.database.db": MagicMock(create_session=MagicMock(return_value=fake_session_cm)),
+        }
+
+        output = {
+            "images": [
+                {"filename": "bad.png", "subfolder": "", "type": "output"},
+                {"filename": "good.png", "subfolder": "", "type": "output"},
+            ]
+        }
+
+        with patch.dict("sys.modules", mocked_modules), \
+             patch("os.path.abspath", side_effect=lambda p: p), \
+             patch("os.path.isfile", return_value=True), \
+             patch("os.path.join", side_effect=os.path.join):
+            import importlib
+            import comfy_execution.asset_enrichment as mod
+            importlib.reload(mod)
+            result = mod.enrich_output_with_assets(output)
+
+        imgs = result["images"]
+        self.assertNotIn("id", imgs[0])
+        self.assertEqual(imgs[1]["id"], "good-ref")
+
+    def test_multiple_output_keys_all_enriched(self):
+        output = {
+            "images": [{"filename": "a.png", "subfolder": "", "type": "output"}],
+            "videos": [{"filename": "b.mp4", "subfolder": "", "type": "output"}],
+        }
+        result = _call(output)
+        self.assertIn("id", result["images"][0])
+        self.assertIn("id", result["videos"][0])
+
+    def test_none_entry_in_list_unchanged(self):
+        output = {"images": [None, {"filename": "a.png", "subfolder": "", "type": "output"}]}
+        result = _call(output)
+        self.assertIsNone(result["images"][0])
+        self.assertIn("id", result["images"][1])
+
+
+if __name__ == "__main__":
+    unittest.main()

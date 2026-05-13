@@ -1,0 +1,75 @@
+"""Enrich executed-node output entries with asset metadata."""
+import logging
+import os
+
+
+def enrich_output_with_assets(output_ui: dict) -> dict:
+    """Inject asset metadata into file-type output entries when --enable-assets is set.
+
+    Returns a new dict; entries without a resolvable on-disk file path are left
+    unchanged. Errors are caught per-entry so a failure never blocks the WS message
+    from sending.
+    """
+    from comfy.cli_args import args
+    if not args.enable_assets:
+        return output_ui
+
+    import folder_paths
+    from app.assets.services.ingest import register_file_in_place, DependencyMissingError
+    from app.assets.database.queries.asset_reference import get_reference_by_file_path
+    from app.database.db import create_session
+
+    enriched = {}
+    for key, entries in output_ui.items():
+        if not isinstance(entries, list):
+            enriched[key] = entries
+            continue
+        new_entries = []
+        for entry in entries:
+            if not isinstance(entry, dict) or "filename" not in entry or "type" not in entry:
+                new_entries.append(entry)
+                continue
+            try:
+                base = folder_paths.get_directory_by_type(entry["type"])
+                if base is None:
+                    new_entries.append(entry)
+                    continue
+                abs_path = os.path.abspath(os.path.join(base, entry.get("subfolder", ""), entry["filename"]))
+                if not os.path.isfile(abs_path):
+                    new_entries.append(entry)
+                    continue
+
+                # Try DB lookup first (cached node re-send); fall back to registering inline.
+                ref = asset = None
+                with create_session() as session:
+                    db_ref = get_reference_by_file_path(session, abs_path)
+                    if db_ref is not None and db_ref.asset is not None and db_ref.asset.hash is not None:
+                        ref = db_ref
+                        asset = db_ref.asset
+
+                if ref is None:
+                    result = register_file_in_place(
+                        abs_path=abs_path,
+                        name=entry["filename"],
+                        tags=[entry["type"]],
+                    )
+                    entry = dict(entry)
+                    entry["id"] = result.ref.id
+                    entry["name"] = result.ref.name
+                    entry["asset_hash"] = result.asset.hash
+                    entry["size"] = result.asset.size_bytes
+                    entry["mime_type"] = result.asset.mime_type
+                else:
+                    entry = dict(entry)
+                    entry["id"] = ref.id
+                    entry["name"] = ref.name
+                    entry["asset_hash"] = asset.hash
+                    entry["size"] = asset.size_bytes
+                    entry["mime_type"] = asset.mime_type
+            except DependencyMissingError:
+                logging.warning("Asset enrichment skipped (blake3 not available): %s", entry.get("filename"))
+            except Exception:
+                logging.warning("Failed to enrich output entry with asset metadata: %s", entry.get("filename"), exc_info=True)
+            new_entries.append(entry)
+        enriched[key] = new_entries
+    return enriched
