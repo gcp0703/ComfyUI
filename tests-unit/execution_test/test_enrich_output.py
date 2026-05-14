@@ -11,23 +11,15 @@ def _make_args(enable_assets: bool):
     return a
 
 
-def _make_db_ref(ref_id="ref-id-1", name="a.png", asset_hash="blake3:abc123", size=1024, mime="image/png"):
+def _make_db_ref(ref_id="ref-id-1"):
     ref = MagicMock()
     ref.id = ref_id
-    ref.name = name
-    ref.asset.hash = asset_hash
-    ref.asset.size_bytes = size
-    ref.asset.mime_type = mime
     return ref
 
 
-def _make_register_result(ref_id="ref-id-2", name="b.png", asset_hash="blake3:def456", size=2048, mime="image/png"):
+def _make_register_result(ref_id="ref-id-2"):
     result = MagicMock()
     result.ref.id = ref_id
-    result.ref.name = name
-    result.asset.hash = asset_hash
-    result.asset.size_bytes = size
-    result.asset.mime_type = mime
     return result
 
 
@@ -44,7 +36,7 @@ def _call(output_ui, *, enable_assets=True, file_exists=True, db_ref=None, regis
             DependencyMissingError=type("DependencyMissingError", (Exception,), {}),
         ),
         "app.assets.database.queries.asset_reference": MagicMock(
-            get_reference_by_file_path=MagicMock(return_value=db_ref or _make_db_ref()),
+            get_reference_by_file_path=MagicMock(return_value=db_ref),
         ),
         "app.database.db": MagicMock(create_session=MagicMock(return_value=fake_session_cm)),
     }
@@ -91,24 +83,26 @@ class TestEnrichOutputWithAssets(unittest.TestCase):
         result = _call(output, directory=None)
         self.assertNotIn("id", result["images"][0])
 
-    def test_db_hit_injects_from_db(self):
-        db_ref = _make_db_ref(ref_id="db-ref", name="from-db.png", asset_hash="blake3:fromdb", size=512)
+    def test_db_hit_injects_id(self):
+        db_ref = _make_db_ref(ref_id="db-ref")
         output = {"images": [{"filename": "a.png", "subfolder": "", "type": "output"}]}
         result = _call(output, db_ref=db_ref)
         img = result["images"][0]
         self.assertEqual(img["id"], "db-ref")
-        self.assertEqual(img["asset_hash"], "blake3:fromdb")
-        self.assertEqual(img["size"], 512)
+        # Only id is injected — no asset_hash, name, preview_url, size
+        self.assertNotIn("asset_hash", img)
+        self.assertNotIn("name", img)
+        self.assertNotIn("preview_url", img)
+        self.assertNotIn("size", img)
 
     def test_db_miss_falls_back_to_register(self):
-        no_hash_ref = _make_db_ref(asset_hash=None)
-        reg = _make_register_result(ref_id="inline-ref", asset_hash="blake3:inline", size=999)
+        reg = _make_register_result(ref_id="inline-ref")
         output = {"images": [{"filename": "new.png", "subfolder": "", "type": "output"}]}
-        result = _call(output, db_ref=no_hash_ref, register_result=reg)
+        result = _call(output, db_ref=None, register_result=reg)
         img = result["images"][0]
         self.assertEqual(img["id"], "inline-ref")
-        self.assertEqual(img["asset_hash"], "blake3:inline")
-        self.assertEqual(img["size"], 999)
+        self.assertNotIn("asset_hash", img)
+        self.assertNotIn("name", img)
 
     def test_original_entry_not_mutated(self):
         orig = {"filename": "a.png", "subfolder": "", "type": "output"}
@@ -118,8 +112,7 @@ class TestEnrichOutputWithAssets(unittest.TestCase):
 
     def test_enrichment_error_does_not_block_sibling_entries(self):
         call_count = [0]
-        good_reg = _make_register_result(ref_id="good-ref", asset_hash="blake3:good")
-        no_hash_ref = _make_db_ref(asset_hash=None)
+        good_reg = _make_register_result(ref_id="good-ref")
 
         def register_side_effect(abs_path, name, tags):
             call_count[0] += 1
@@ -139,7 +132,7 @@ class TestEnrichOutputWithAssets(unittest.TestCase):
                 DependencyMissingError=type("DependencyMissingError", (Exception,), {}),
             ),
             "app.assets.database.queries.asset_reference": MagicMock(
-                get_reference_by_file_path=MagicMock(return_value=no_hash_ref),
+                get_reference_by_file_path=MagicMock(return_value=None),
             ),
             "app.database.db": MagicMock(create_session=MagicMock(return_value=fake_session_cm)),
         }

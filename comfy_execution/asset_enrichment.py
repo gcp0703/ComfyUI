@@ -1,14 +1,20 @@
-"""Enrich executed-node output entries with asset metadata."""
+"""Enrich executed-node output entries with asset id."""
 import logging
 import os
 
 
 def enrich_output_with_assets(output_ui: dict) -> dict:
-    """Inject asset metadata into file-type output entries when --enable-assets is set.
+    """Inject asset id into file-type output entries when --enable-assets is set.
+
+    Only ``id`` is added — per the Asset Identity RFC the WebSocket payload
+    carries just enough for the client to fetch the full asset via
+    GET /api/assets/{id}.  hash, name, preview_url, and size are intentionally
+    omitted: hash is already encoded in the filename; the rest require an
+    explicit API call.
 
     Returns a new dict; entries without a resolvable on-disk file path are left
-    unchanged. Errors are caught per-entry so a failure never blocks the WS message
-    from sending.
+    unchanged. Errors are caught per-entry so a failure never blocks the WS
+    message from sending.
     """
     from comfy.cli_args import args
     if not args.enable_assets:
@@ -40,36 +46,26 @@ def enrich_output_with_assets(output_ui: dict) -> dict:
                     continue
 
                 # Try DB lookup first (cached node re-send); fall back to registering inline.
-                ref = asset = None
+                asset_id = None
                 with create_session() as session:
                     db_ref = get_reference_by_file_path(session, abs_path)
-                    if db_ref is not None and db_ref.asset is not None and db_ref.asset.hash is not None:
-                        ref = db_ref
-                        asset = db_ref.asset
+                    if db_ref is not None:
+                        asset_id = db_ref.id
 
-                if ref is None:
+                if asset_id is None:
                     result = register_file_in_place(
                         abs_path=abs_path,
                         name=entry["filename"],
                         tags=[entry["type"]],
                     )
-                    entry = dict(entry)
-                    entry["id"] = result.ref.id
-                    entry["name"] = result.ref.name
-                    entry["asset_hash"] = result.asset.hash
-                    entry["size"] = result.asset.size_bytes
-                    entry["mime_type"] = result.asset.mime_type
-                else:
-                    entry = dict(entry)
-                    entry["id"] = ref.id
-                    entry["name"] = ref.name
-                    entry["asset_hash"] = asset.hash
-                    entry["size"] = asset.size_bytes
-                    entry["mime_type"] = asset.mime_type
+                    asset_id = result.ref.id
+
+                entry = dict(entry)
+                entry["id"] = asset_id
             except DependencyMissingError:
                 logging.warning("Asset enrichment skipped (blake3 not available): %s", entry.get("filename"))
             except Exception:
-                logging.warning("Failed to enrich output entry with asset metadata: %s", entry.get("filename"), exc_info=True)
+                logging.warning("Failed to enrich output entry with asset id: %s", entry.get("filename"), exc_info=True)
             new_entries.append(entry)
         enriched[key] = new_entries
     return enriched
