@@ -7,7 +7,8 @@ from dataclasses import dataclass
 
 PROFILE_FLUX1_DEV = "flux1-dev"
 PROFILE_FLUX2_KLEIN = "flux2-klein"
-KNOWN_PROFILES = (PROFILE_FLUX1_DEV, PROFILE_FLUX2_KLEIN)
+PROFILE_CHROMA1 = "chroma1"
+KNOWN_PROFILES = (PROFILE_FLUX1_DEV, PROFILE_FLUX2_KLEIN, PROFILE_CHROMA1)
 
 
 class ConfigError(RuntimeError):
@@ -30,6 +31,10 @@ class Config:
     flux2_unet: str
     flux2_clip: str
     flux2_vae: str
+    # Chroma1 profile (de-distilled Flux derivative — T5 only, real CFG)
+    chroma_unet: str
+    chroma_clip: str
+    chroma_vae: str
     sas_expiry_hours: int = 24
     poll_interval_seconds: float = 2.0
     visibility_timeout_seconds: int = 300
@@ -83,6 +88,9 @@ def load_config() -> Config:
         flux2_unet=_require("COMFY_FLUX2_UNET"),
         flux2_clip=_require("COMFY_FLUX2_CLIP"),
         flux2_vae=_require("COMFY_FLUX2_VAE"),
+        chroma_unet=_require("COMFY_CHROMA_UNET"),
+        chroma_clip=_require("COMFY_CHROMA_CLIP"),
+        chroma_vae=_require("COMFY_CHROMA_VAE"),
         sas_expiry_hours=_optional_int("SAS_EXPIRY_HOURS", 24),
         poll_interval_seconds=_optional_float("POLL_INTERVAL_SECONDS", 2.0),
         visibility_timeout_seconds=_optional_int("VISIBILITY_TIMEOUT_SECONDS", 300),

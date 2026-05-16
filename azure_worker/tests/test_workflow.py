@@ -6,6 +6,7 @@ import json
 import pytest
 
 from azure_worker.config import (
+    PROFILE_CHROMA1,
     PROFILE_FLUX1_DEV,
     PROFILE_FLUX2_KLEIN,
     Config,
@@ -17,8 +18,10 @@ from azure_worker.messages import (
     sanitize_name,
 )
 from azure_worker.workflow import (
+    CHROMA1_SAVE_NODE_ID,
     FLUX1_SAVE_NODE_ID,
     FLUX2_SAVE_NODE_ID,
+    build_chroma1_workflow,
     build_flux1_dev_workflow,
     build_flux2_klein_workflow,
     build_workflow,
@@ -39,6 +42,9 @@ def _cfg(profile: str) -> Config:
         flux2_unet="flux-2-klein-9b-fp8.safetensors",
         flux2_clip="qwen_3_8b_fp8mixed.safetensors",
         flux2_vae="full_encoder_small_decoder.safetensors",
+        chroma_unet="Chroma1-HD-fp8mixed.safetensors",
+        chroma_clip="t5xxl_fp16.safetensors",
+        chroma_vae="ae.safetensors",
     )
 
 
@@ -131,13 +137,64 @@ def test_flux2_workflow_shape():
     assert wf[FLUX2_SAVE_NODE_ID]["class_type"] == "SaveImage"
 
 
+# -- Chroma1 workflow --
+
+def test_chroma1_workflow_shape():
+    req = ImageRequest.from_json(_sample_payload(
+        prompt="dragon",
+        negative_prompt="blurry, low quality",
+        seed=99,
+        width=1024,
+        height=1024,
+        steps=26,
+        cfg=3.5,
+    ))
+    wf = build_chroma1_workflow(req, _cfg(PROFILE_CHROMA1))
+
+    assert wf["1"]["class_type"] == "UNETLoader"
+    assert wf["1"]["inputs"]["unet_name"] == "Chroma1-HD-fp8mixed.safetensors"
+
+    assert wf["2"]["class_type"] == "CLIPLoader"
+    assert wf["2"]["inputs"]["clip_name"] == "t5xxl_fp16.safetensors"
+    assert wf["2"]["inputs"]["type"] == "chroma"
+
+    assert wf["3"]["inputs"]["vae_name"] == "ae.safetensors"
+    assert wf["4"]["class_type"] == "ModelSamplingAuraFlow"
+    assert wf["4"]["inputs"]["shift"] == 1.0
+    assert wf["5"]["class_type"] == "T5TokenizerOptions"
+
+    # Real negative prompt (unlike flux profiles)
+    assert wf["6"]["inputs"]["text"] == "dragon"
+    assert wf["7"]["inputs"]["text"] == "blurry, low quality"
+
+    # Real CFG flowing through CFGGuider (not BasicGuider)
+    assert wf["8"]["class_type"] == "CFGGuider"
+    assert wf["8"]["inputs"]["cfg"] == 3.5
+
+    # Beta scheduler is the whole point of using chroma
+    assert wf["9"]["inputs"]["sampler_name"] == "euler"
+    assert wf["10"]["class_type"] == "BasicScheduler"
+    assert wf["10"]["inputs"]["scheduler"] == "beta"
+    assert wf["10"]["inputs"]["steps"] == 26
+
+    assert wf["11"]["inputs"]["noise_seed"] == 99
+    assert wf["12"]["class_type"] == "EmptySD3LatentImage"
+
+    sampler = wf["13"]
+    assert sampler["class_type"] == "SamplerCustomAdvanced"
+    assert sampler["inputs"]["guider"] == ["8", 0]
+    assert sampler["inputs"]["sigmas"] == ["10", 0]
+
+    assert wf[CHROMA1_SAVE_NODE_ID]["class_type"] == "SaveImage"
+
+
 # -- Dispatcher --
 
 def test_dispatcher_picks_flux1_for_flux1_profile():
     req = ImageRequest.from_json(_sample_payload())
     wf = build_workflow(req, _cfg(PROFILE_FLUX1_DEV))
     assert wf["2"]["class_type"] == "DualCLIPLoader"  # only flux1 has this
-    assert "12" not in wf  # flux2's save node id
+    assert "14" not in wf  # chroma1's save node id
 
 
 def test_dispatcher_picks_flux2_for_flux2_profile():
@@ -145,6 +202,13 @@ def test_dispatcher_picks_flux2_for_flux2_profile():
     wf = build_workflow(req, _cfg(PROFILE_FLUX2_KLEIN))
     assert wf["6"]["class_type"] == "Flux2Scheduler"  # only flux2 has this
     assert wf[FLUX2_SAVE_NODE_ID]["class_type"] == "SaveImage"
+
+
+def test_dispatcher_picks_chroma1_for_chroma1_profile():
+    req = ImageRequest.from_json(_sample_payload())
+    wf = build_workflow(req, _cfg(PROFILE_CHROMA1))
+    assert wf["4"]["class_type"] == "ModelSamplingAuraFlow"  # only chroma1 has this
+    assert wf[CHROMA1_SAVE_NODE_ID]["class_type"] == "SaveImage"
 
 
 # -- Result message --
