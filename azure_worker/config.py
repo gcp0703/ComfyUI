@@ -5,6 +5,11 @@ import os
 from dataclasses import dataclass
 
 
+PROFILE_FLUX1_DEV = "flux1-dev"
+PROFILE_FLUX2_KLEIN = "flux2-klein"
+KNOWN_PROFILES = (PROFILE_FLUX1_DEV, PROFILE_FLUX2_KLEIN)
+
+
 class ConfigError(RuntimeError):
     pass
 
@@ -15,9 +20,16 @@ class Config:
     inbound_queue: str
     outbound_queue: str
     blob_container: str
-    flux_unet: str
-    flux_clip: str
-    flux_vae: str
+    profile: str
+    # Flux 1 dev profile
+    flux1_unet: str
+    flux1_clip_l: str
+    flux1_t5: str
+    flux1_vae: str
+    # Flux 2 Klein profile
+    flux2_unet: str
+    flux2_clip: str
+    flux2_vae: str
     sas_expiry_hours: int = 24
     poll_interval_seconds: float = 2.0
     visibility_timeout_seconds: int = 300
@@ -52,14 +64,25 @@ def _optional_float(name: str, default: float) -> float:
 
 
 def load_config() -> Config:
+    profile = _require("COMFY_PROFILE")
+    if profile not in KNOWN_PROFILES:
+        raise ConfigError(
+            f"COMFY_PROFILE={profile!r} not recognized; expected one of {KNOWN_PROFILES}"
+        )
+
     return Config(
         storage_connection_string=_require("AZURE_STORAGE_CONNECTION_STRING"),
         inbound_queue=_require("AZURE_INBOUND_QUEUE"),
         outbound_queue=_require("AZURE_OUTBOUND_QUEUE"),
         blob_container=_require("AZURE_BLOB_CONTAINER"),
-        flux_unet=_require("COMFY_FLUX_UNET"),
-        flux_clip=_require("COMFY_FLUX_CLIP"),
-        flux_vae=_require("COMFY_FLUX_VAE"),
+        profile=profile,
+        flux1_unet=_require("COMFY_FLUX1_UNET"),
+        flux1_clip_l=_require("COMFY_FLUX1_CLIP_L"),
+        flux1_t5=_require("COMFY_FLUX1_T5"),
+        flux1_vae=_require("COMFY_FLUX1_VAE"),
+        flux2_unet=_require("COMFY_FLUX2_UNET"),
+        flux2_clip=_require("COMFY_FLUX2_CLIP"),
+        flux2_vae=_require("COMFY_FLUX2_VAE"),
         sas_expiry_hours=_optional_int("SAS_EXPIRY_HOURS", 24),
         poll_interval_seconds=_optional_float("POLL_INTERVAL_SECONDS", 2.0),
         visibility_timeout_seconds=_optional_int("VISIBILITY_TIMEOUT_SECONDS", 300),

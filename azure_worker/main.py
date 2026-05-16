@@ -50,12 +50,7 @@ def _process_one(runner: ComfyRunner, clients: azure_io.AzureClients) -> bool:
     try:
         req = ImageRequest.from_json(raw_body)
         log.info("job %s name=%s %dx%d", req.job_id, req.name, req.width, req.height)
-        workflow = build_workflow(
-            req,
-            unet=clients.config.flux_unet,
-            clip=clients.config.flux_clip,
-            vae=clients.config.flux_vae,
-        )
+        workflow = build_workflow(req, clients.config)
         outputs = runner.run(workflow, prompt_id=req.job_id)
         if not outputs:
             raise ComfyJobError("workflow produced no output files")
@@ -94,7 +89,7 @@ def main() -> int:
         print(f"config error: {e}", file=sys.stderr)
         return 2
 
-    log.info("starting ComfyUI runner (unet=%s clip=%s vae=%s)", cfg.flux_unet, cfg.flux_clip, cfg.flux_vae)
+    log.info("starting ComfyUI runner (profile=%s)", cfg.profile)
     runner = ComfyRunner()
     clients = azure_io.build_clients(cfg)
     _install_signal_handlers()
