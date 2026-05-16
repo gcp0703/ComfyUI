@@ -116,12 +116,12 @@ A single JSON object:
 | `job_id` | string | no | If omitted, the worker generates a UUID. **Provide your own UUID** if you want to correlate requests with results — see §8. |
 | `name` | string | yes | Non-empty. Becomes the filename prefix for the generated PNG (sanitized — non-alphanumeric chars are replaced with `_`). Does not need to be unique. |
 | `prompt` | string | yes | Non-empty. Max 4000 chars. |
-| `negative_prompt` | string | no | Max 4000 chars. **Currently ignored** by the Flux 2 Klein pipeline (guidance-distilled, no negative path). Accepted for forward compatibility. |
+| `negative_prompt` | string | no | Max 4000 chars. **Currently ignored** by both supported profiles (Flux 1 dev uses `ConditioningZeroOut`; Flux 2 Klein uses `BasicGuider`). Accepted for forward compatibility. |
 | `width` | integer | yes | 64 ≤ w ≤ 4096, **multiple of 16**. |
 | `height` | integer | yes | 64 ≤ h ≤ 4096, **multiple of 16**. |
 | `seed` | integer | no | 64-bit unsigned. If omitted, the worker picks a random seed and returns it in the result so the run is reproducible. |
-| `steps` | integer | no | 1 ≤ steps ≤ 200. Default 20. Flux 2 Klein is fine at 20; lower for speed, higher only with diminishing returns. |
-| `cfg` | number | no | 0.0 ≤ cfg ≤ 30.0. Default 7.0. **Currently ignored** by Flux 2 Klein. Accepted for forward compatibility. |
+| `steps` | integer | no | 1 ≤ steps ≤ 200. Default 20. Both Flux profiles are fine at 20; lower for speed, higher with diminishing returns. |
+| `cfg` | number | no | 0.0 ≤ cfg ≤ 30.0. Default 7.0. **Currently ignored** by both supported profiles (both are guidance-distilled). Accepted for forward compatibility. |
 
 ### Example
 

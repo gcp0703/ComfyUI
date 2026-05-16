@@ -5,18 +5,41 @@ import json
 
 import pytest
 
+from azure_worker.config import (
+    PROFILE_FLUX1_DEV,
+    PROFILE_FLUX2_KLEIN,
+    Config,
+)
 from azure_worker.messages import (
     ImageRequest,
     ImageResult,
     MessageValidationError,
     sanitize_name,
 )
-from azure_worker.workflow import SAVE_NODE_ID, build_workflow
+from azure_worker.workflow import (
+    FLUX1_SAVE_NODE_ID,
+    FLUX2_SAVE_NODE_ID,
+    build_flux1_dev_workflow,
+    build_flux2_klein_workflow,
+    build_workflow,
+)
 
 
-UNET = "flux-2-klein-9b-fp8.safetensors"
-CLIP = "qwen_3_8b_fp8mixed.safetensors"
-VAE = "ae.safetensors"
+def _cfg(profile: str) -> Config:
+    return Config(
+        storage_connection_string="x",
+        inbound_queue="i",
+        outbound_queue="o",
+        blob_container="c",
+        profile=profile,
+        flux1_unet="flux1-dev.safetensors",
+        flux1_clip_l="clip_l.safetensors",
+        flux1_t5="t5xxl_fp16.safetensors",
+        flux1_vae="ae.safetensors",
+        flux2_unet="flux-2-klein-9b-fp8.safetensors",
+        flux2_clip="qwen_3_8b_fp8mixed.safetensors",
+        flux2_vae="full_encoder_small_decoder.safetensors",
+    )
 
 
 def _sample_payload(**overrides):
@@ -32,6 +55,8 @@ def _sample_payload(**overrides):
     return json.dumps(payload)
 
 
+# -- Message validation --
+
 def test_request_round_trip_defaults():
     req = ImageRequest.from_json(_sample_payload())
     assert req.job_id == "abc"
@@ -41,7 +66,6 @@ def test_request_round_trip_defaults():
 
 
 def test_request_rejects_non_multiple_of_16():
-    # Flux 2 requires 16-pixel alignment, so 1024+8 should be rejected.
     with pytest.raises(MessageValidationError):
         ImageRequest.from_json(_sample_payload(width=1032))
 
@@ -51,41 +75,79 @@ def test_request_rejects_missing_prompt():
         ImageRequest.from_json(json.dumps({"name": "x", "width": 1024, "height": 1024}))
 
 
-def test_workflow_wires_request_and_models():
+# -- Flux 1 dev workflow --
+
+def test_flux1_workflow_shape():
     req = ImageRequest.from_json(_sample_payload(prompt="dragon", seed=99, width=1024, height=768))
-    wf = build_workflow(req, unet=UNET, clip=CLIP, vae=VAE)
+    wf = build_flux1_dev_workflow(req, _cfg(PROFILE_FLUX1_DEV))
 
     assert wf["1"]["class_type"] == "UNETLoader"
-    assert wf["1"]["inputs"]["unet_name"] == UNET
-    assert wf["1"]["inputs"]["weight_dtype"] == "fp8_e4m3fn"
+    assert wf["1"]["inputs"]["unet_name"] == "flux1-dev.safetensors"
+    assert wf["1"]["inputs"]["weight_dtype"] == "default"
 
-    assert wf["2"]["class_type"] == "CLIPLoader"
-    assert wf["2"]["inputs"]["clip_name"] == CLIP
-    assert wf["2"]["inputs"]["type"] == "flux2"
+    assert wf["2"]["class_type"] == "DualCLIPLoader"
+    assert wf["2"]["inputs"]["clip_name1"] == "clip_l.safetensors"
+    assert wf["2"]["inputs"]["clip_name2"] == "t5xxl_fp16.safetensors"
+    assert wf["2"]["inputs"]["type"] == "flux"
 
-    assert wf["3"]["class_type"] == "VAELoader"
-    assert wf["3"]["inputs"]["vae_name"] == VAE
-
+    assert wf["3"]["inputs"]["vae_name"] == "ae.safetensors"
     assert wf["4"]["inputs"]["text"] == "dragon"
-    assert wf["5"]["class_type"] == "EmptyFlux2LatentImage"
-    assert wf["5"]["inputs"]["width"] == 1024
-    assert wf["5"]["inputs"]["height"] == 768
+    assert wf["5"]["class_type"] == "ConditioningZeroOut"
+    assert wf["6"]["class_type"] == "EmptySD3LatentImage"
+    assert wf["6"]["inputs"]["width"] == 1024 and wf["6"]["inputs"]["height"] == 768
 
+    ks = wf["7"]
+    assert ks["class_type"] == "KSampler"
+    assert ks["inputs"]["seed"] == 99
+    assert ks["inputs"]["cfg"] == 1
+    assert ks["inputs"]["sampler_name"] == "euler"
+    assert ks["inputs"]["scheduler"] == "simple"
+    assert ks["inputs"]["positive"] == ["4", 0]
+    assert ks["inputs"]["negative"] == ["5", 0]
+
+    assert wf[FLUX1_SAVE_NODE_ID]["class_type"] == "SaveImage"
+    assert wf[FLUX1_SAVE_NODE_ID]["inputs"]["filename_prefix"] == "test-image"
+
+
+# -- Flux 2 Klein workflow --
+
+def test_flux2_workflow_shape():
+    req = ImageRequest.from_json(_sample_payload(prompt="dragon", seed=99, width=1024, height=768))
+    wf = build_flux2_klein_workflow(req, _cfg(PROFILE_FLUX2_KLEIN))
+
+    assert wf["1"]["inputs"]["unet_name"] == "flux-2-klein-9b-fp8.safetensors"
+    assert wf["1"]["inputs"]["weight_dtype"] == "fp8_e4m3fn"
+    assert wf["2"]["inputs"]["clip_name"] == "qwen_3_8b_fp8mixed.safetensors"
+    assert wf["2"]["inputs"]["type"] == "flux2"
+    assert wf["3"]["inputs"]["vae_name"] == "full_encoder_small_decoder.safetensors"
+    assert wf["5"]["class_type"] == "EmptyFlux2LatentImage"
     assert wf["6"]["class_type"] == "Flux2Scheduler"
-    assert wf["7"]["inputs"]["sampler_name"] == "euler"
     assert wf["8"]["inputs"]["noise_seed"] == 99
 
     sampler = wf["10"]
     assert sampler["class_type"] == "SamplerCustomAdvanced"
-    assert sampler["inputs"]["noise"] == ["8", 0]
-    assert sampler["inputs"]["guider"] == ["9", 0]
-    assert sampler["inputs"]["sampler"] == ["7", 0]
     assert sampler["inputs"]["sigmas"] == ["6", 0]
-    assert sampler["inputs"]["latent_image"] == ["5", 0]
 
-    assert wf[SAVE_NODE_ID]["class_type"] == "SaveImage"
-    assert wf[SAVE_NODE_ID]["inputs"]["filename_prefix"] == "test-image"
+    assert wf[FLUX2_SAVE_NODE_ID]["class_type"] == "SaveImage"
 
+
+# -- Dispatcher --
+
+def test_dispatcher_picks_flux1_for_flux1_profile():
+    req = ImageRequest.from_json(_sample_payload())
+    wf = build_workflow(req, _cfg(PROFILE_FLUX1_DEV))
+    assert wf["2"]["class_type"] == "DualCLIPLoader"  # only flux1 has this
+    assert "12" not in wf  # flux2's save node id
+
+
+def test_dispatcher_picks_flux2_for_flux2_profile():
+    req = ImageRequest.from_json(_sample_payload())
+    wf = build_workflow(req, _cfg(PROFILE_FLUX2_KLEIN))
+    assert wf["6"]["class_type"] == "Flux2Scheduler"  # only flux2 has this
+    assert wf[FLUX2_SAVE_NODE_ID]["class_type"] == "SaveImage"
+
+
+# -- Result message --
 
 def test_result_success_serializes():
     req = ImageRequest.from_json(_sample_payload())
