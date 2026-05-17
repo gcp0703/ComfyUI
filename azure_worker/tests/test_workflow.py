@@ -9,6 +9,7 @@ from azure_worker.config import (
     PROFILE_CHROMA1,
     PROFILE_FLUX1_DEV,
     PROFILE_FLUX2_KLEIN,
+    PROFILE_FLUXED_UP,
     Config,
 )
 from azure_worker.messages import (
@@ -21,9 +22,11 @@ from azure_worker.workflow import (
     CHROMA1_SAVE_NODE_ID,
     FLUX1_SAVE_NODE_ID,
     FLUX2_SAVE_NODE_ID,
+    FLUXED_UP_SAVE_NODE_ID,
     build_chroma1_workflow,
     build_flux1_dev_workflow,
     build_flux2_klein_workflow,
+    build_fluxed_up_workflow,
     build_workflow,
 )
 
@@ -45,6 +48,7 @@ def _cfg(profile: str) -> Config:
         chroma_unet="Chroma1-HD-fp8mixed.safetensors",
         chroma_clip="t5xxl_fp16.safetensors",
         chroma_vae="ae.safetensors",
+        fluxedup_unet="fluxedUpFluxNSFW_40DevFp8.safetensors",
     )
 
 
@@ -209,6 +213,40 @@ def test_dispatcher_picks_chroma1_for_chroma1_profile():
     wf = build_workflow(req, _cfg(PROFILE_CHROMA1))
     assert wf["4"]["class_type"] == "ModelSamplingAuraFlow"  # only chroma1 has this
     assert wf[CHROMA1_SAVE_NODE_ID]["class_type"] == "SaveImage"
+
+
+# -- Fluxed Up workflow --
+
+def test_fluxed_up_workflow_shape():
+    req = ImageRequest.from_json(_sample_payload(prompt="dragon", seed=99, width=1024, height=1024))
+    wf = build_fluxed_up_workflow(req, _cfg(PROFILE_FLUXED_UP))
+
+    # Different UNet from vanilla flux1-dev, loaded in fp8
+    assert wf["1"]["class_type"] == "UNETLoader"
+    assert wf["1"]["inputs"]["unet_name"] == "fluxedUpFluxNSFW_40DevFp8.safetensors"
+    assert wf["1"]["inputs"]["weight_dtype"] == "fp8_e4m3fn"
+
+    # Reuses the flux1 CLIP-L + T5 + VAE
+    assert wf["2"]["class_type"] == "DualCLIPLoader"
+    assert wf["2"]["inputs"]["clip_name1"] == "clip_l.safetensors"
+    assert wf["2"]["inputs"]["clip_name2"] == "t5xxl_fp16.safetensors"
+    assert wf["2"]["inputs"]["type"] == "flux"
+    assert wf["3"]["inputs"]["vae_name"] == "ae.safetensors"
+
+    # Same guidance-distilled driving as flux1-dev (cfg=1 + ConditioningZeroOut)
+    assert wf["5"]["class_type"] == "ConditioningZeroOut"
+    ks = wf["7"]
+    assert ks["class_type"] == "KSampler"
+    assert ks["inputs"]["cfg"] == 1
+    assert ks["inputs"]["seed"] == 99
+    assert wf[FLUXED_UP_SAVE_NODE_ID]["class_type"] == "SaveImage"
+
+
+def test_dispatcher_picks_fluxed_up_for_fluxed_up_profile():
+    req = ImageRequest.from_json(_sample_payload())
+    wf = build_workflow(req, _cfg(PROFILE_FLUXED_UP))
+    assert wf["1"]["inputs"]["unet_name"] == "fluxedUpFluxNSFW_40DevFp8.safetensors"
+    assert wf["1"]["inputs"]["weight_dtype"] == "fp8_e4m3fn"  # distinguishes from flux1-dev
 
 
 # -- Result message --

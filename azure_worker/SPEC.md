@@ -116,12 +116,12 @@ A single JSON object:
 | `job_id` | string | no | If omitted, the worker generates a UUID. **Provide your own UUID** if you want to correlate requests with results — see §8. |
 | `name` | string | yes | Non-empty. Becomes the filename prefix for the generated PNG (sanitized — non-alphanumeric chars are replaced with `_`). Does not need to be unique. |
 | `prompt` | string | yes | Non-empty. Max 4000 chars. |
-| `negative_prompt` | string | no | Max 4000 chars. **Honored on `chroma1`** (Chroma is de-distilled and supports real CFG with a real negative). **Ignored** on `flux1-dev` (uses `ConditioningZeroOut`) and `flux2-klein` (uses `BasicGuider` — no negative path). |
+| `negative_prompt` | string | no | Max 4000 chars. **Honored on `chroma1`** (Chroma is de-distilled and supports real CFG with a real negative). **Ignored** on `flux1-dev` and `fluxed-up` (both use `ConditioningZeroOut`) and `flux2-klein` (uses `BasicGuider` — no negative path). |
 | `width` | integer | yes | 64 ≤ w ≤ 4096, **multiple of 16**. |
 | `height` | integer | yes | 64 ≤ h ≤ 4096, **multiple of 16**. |
 | `seed` | integer | no | 64-bit unsigned. If omitted, the worker picks a random seed and returns it in the result so the run is reproducible. |
 | `steps` | integer | no | 1 ≤ steps ≤ 200. Default 20. Both Flux profiles work well at 20; `chroma1`'s recommended baseline is **26** (workable from 20 for iteration up to 35–50 for finer detail). |
-| `cfg` | number | no | 0.0 ≤ cfg ≤ 30.0. Default 7.0. **Honored on `chroma1`** — recommended **3.5** (workable range 3.5–7; flow-matching models break down hard above ~7). **Ignored** on the Flux profiles (both are guidance-distilled). |
+| `cfg` | number | no | 0.0 ≤ cfg ≤ 30.0. Default 7.0. **Honored on `chroma1`** — recommended **3.5** (workable range 3.5–7; flow-matching models break down hard above ~7). **Ignored** on `flux1-dev`, `flux2-klein`, and `fluxed-up` (all guidance-distilled). |
 
 ### Example
 

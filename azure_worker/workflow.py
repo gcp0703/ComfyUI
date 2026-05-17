@@ -1,6 +1,6 @@
 """ComfyUI workflow builders.
 
-Three profiles are supported, selected at startup via `COMFY_PROFILE`:
+Four profiles are supported, selected at startup via `COMFY_PROFILE`:
 
 - ``flux1-dev`` — the classic Flux 1 dev pipeline (UNETLoader + DualCLIPLoader
   with clip_l + T5-XXL + the Flux 1 VAE), shaped to match the official
@@ -13,6 +13,10 @@ Three profiles are supported, selected at startup via `COMFY_PROFILE`:
   ``ModelSamplingAuraFlow`` (sigma shift 1.0) + ``CFGGuider`` + ``BasicScheduler``
   (beta) + ``SamplerCustomAdvanced``. Unlike the Flux profiles, Chroma supports
   proper CFG and a real negative prompt.
+- ``fluxed-up`` — NSFW Flux 1 dev finetune. Same workflow shape as flux1-dev
+  (DualCLIPLoader/KSampler/ConditioningZeroOut), but loads the Fluxed Up UNet
+  in fp8 mode. Reuses the flux1 CLIP-L/T5/VAE since the architecture is
+  identical.
 
 A single ``build_workflow(req, cfg)`` dispatcher picks the right builder.
 """
@@ -23,6 +27,7 @@ from .config import (
     PROFILE_CHROMA1,
     PROFILE_FLUX1_DEV,
     PROFILE_FLUX2_KLEIN,
+    PROFILE_FLUXED_UP,
 )
 from .messages import ImageRequest, sanitize_name
 
@@ -32,6 +37,7 @@ from .messages import ImageRequest, sanitize_name
 FLUX1_SAVE_NODE_ID = "9"
 FLUX2_SAVE_NODE_ID = "12"
 CHROMA1_SAVE_NODE_ID = "14"
+FLUXED_UP_SAVE_NODE_ID = "9"
 
 
 # Chroma sampling defaults baked into the workflow — these are not user-tunable
@@ -49,6 +55,8 @@ def build_workflow(req: ImageRequest, cfg: Config) -> dict:
         return build_flux2_klein_workflow(req, cfg)
     if cfg.profile == PROFILE_CHROMA1:
         return build_chroma1_workflow(req, cfg)
+    if cfg.profile == PROFILE_FLUXED_UP:
+        return build_fluxed_up_workflow(req, cfg)
     raise ValueError(f"unknown profile {cfg.profile!r}")  # pragma: no cover
 
 
@@ -291,5 +299,78 @@ def build_chroma1_workflow(req: ImageRequest, cfg: Config) -> dict:
         "15": {
             "class_type": "VAEDecode",
             "inputs": {"samples": ["13", 0], "vae": ["3", 0]},
+        },
+    }
+
+
+def build_fluxed_up_workflow(req: ImageRequest, cfg: Config) -> dict:
+    """NSFW Flux 1 dev finetune (Scorpion06/FluxedUp).
+
+    Identical pipeline shape to :func:`build_flux1_dev_workflow` — same
+    DualCLIPLoader (clip_l + T5-XXL, type=flux), same Flux 1 VAE
+    (``ae.safetensors``), same KSampler with ``cfg=1`` + ``ConditioningZeroOut``
+    for the negative (Flux 1 dev is guidance-distilled). The only differences
+    are the UNet file (the finetune) and ``weight_dtype="fp8_e4m3fn"`` because
+    the Fluxed Up release is already fp8-mixed quantized.
+
+    Reuses ``cfg.flux1_clip_l`` / ``cfg.flux1_t5`` / ``cfg.flux1_vae`` since
+    those files are byte-identical for any Flux 1 dev derivative.
+    """
+    filename_prefix = sanitize_name(req.name)
+    return {
+        "1": {
+            "class_type": "UNETLoader",
+            "inputs": {"unet_name": cfg.fluxedup_unet, "weight_dtype": "fp8_e4m3fn"},
+        },
+        "2": {
+            "class_type": "DualCLIPLoader",
+            "inputs": {
+                "clip_name1": cfg.flux1_clip_l,
+                "clip_name2": cfg.flux1_t5,
+                "type": "flux",
+            },
+        },
+        "3": {
+            "class_type": "VAELoader",
+            "inputs": {"vae_name": cfg.flux1_vae},
+        },
+        "4": {
+            "class_type": "CLIPTextEncode",
+            "inputs": {"clip": ["2", 0], "text": req.prompt},
+        },
+        "5": {
+            "class_type": "ConditioningZeroOut",
+            "inputs": {"conditioning": ["4", 0]},
+        },
+        "6": {
+            "class_type": "EmptySD3LatentImage",
+            "inputs": {
+                "width": req.width,
+                "height": req.height,
+                "batch_size": 1,
+            },
+        },
+        "7": {
+            "class_type": "KSampler",
+            "inputs": {
+                "seed": req.seed,
+                "steps": req.steps,
+                "cfg": 1,
+                "sampler_name": "euler",
+                "scheduler": "simple",
+                "denoise": 1,
+                "model": ["1", 0],
+                "positive": ["4", 0],
+                "negative": ["5", 0],
+                "latent_image": ["6", 0],
+            },
+        },
+        "8": {
+            "class_type": "VAEDecode",
+            "inputs": {"samples": ["7", 0], "vae": ["3", 0]},
+        },
+        FLUXED_UP_SAVE_NODE_ID: {
+            "class_type": "SaveImage",
+            "inputs": {"filename_prefix": filename_prefix, "images": ["8", 0]},
         },
     }
