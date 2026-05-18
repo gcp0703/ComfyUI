@@ -1,6 +1,6 @@
 """ComfyUI workflow builders.
 
-Four profiles are supported, selected at startup via `COMFY_PROFILE`:
+Five profiles are supported, selected at startup via `COMFY_PROFILE`:
 
 - ``flux1-dev`` — the classic Flux 1 dev pipeline (UNETLoader + DualCLIPLoader
   with clip_l + T5-XXL + the Flux 1 VAE), shaped to match the official
@@ -17,6 +17,10 @@ Four profiles are supported, selected at startup via `COMFY_PROFILE`:
   (DualCLIPLoader/KSampler/ConditioningZeroOut), but loads the Fluxed Up UNet
   in fp8 mode. Reuses the flux1 CLIP-L/T5/VAE since the architecture is
   identical.
+- ``qwen-image-2512`` — Alibaba Qwen-Image (December 2025 release). UNETLoader
+  fp8 + CLIPLoader(type=qwen_image) with Qwen 2.5 VL 7B + its own VAE,
+  ``ModelSamplingAuraFlow`` (sigma shift 3.1), stock KSampler (euler/simple).
+  Like chroma1, honors ``req.cfg`` and ``req.negative_prompt``.
 
 A single ``build_workflow(req, cfg)`` dispatcher picks the right builder.
 """
@@ -28,6 +32,7 @@ from .config import (
     PROFILE_FLUX1_DEV,
     PROFILE_FLUX2_KLEIN,
     PROFILE_FLUXED_UP,
+    PROFILE_QWEN_IMAGE_2512,
 )
 from .messages import ImageRequest, sanitize_name
 
@@ -38,6 +43,7 @@ FLUX1_SAVE_NODE_ID = "9"
 FLUX2_SAVE_NODE_ID = "12"
 CHROMA1_SAVE_NODE_ID = "14"
 FLUXED_UP_SAVE_NODE_ID = "9"
+QWEN_IMAGE_SAVE_NODE_ID = "10"
 
 
 # Chroma sampling defaults baked into the workflow — these are not user-tunable
@@ -46,6 +52,12 @@ FLUXED_UP_SAVE_NODE_ID = "9"
 CHROMA_SAMPLER = "euler"
 CHROMA_SCHEDULER = "beta"
 CHROMA_SHIFT = 1.0
+
+
+# Qwen-Image 2512 sampling defaults (from the official ComfyUI template).
+QWEN_IMAGE_SAMPLER = "euler"
+QWEN_IMAGE_SCHEDULER = "simple"
+QWEN_IMAGE_SHIFT = 3.1
 
 
 def build_workflow(req: ImageRequest, cfg: Config) -> dict:
@@ -57,6 +69,8 @@ def build_workflow(req: ImageRequest, cfg: Config) -> dict:
         return build_chroma1_workflow(req, cfg)
     if cfg.profile == PROFILE_FLUXED_UP:
         return build_fluxed_up_workflow(req, cfg)
+    if cfg.profile == PROFILE_QWEN_IMAGE_2512:
+        return build_qwen_image_2512_workflow(req, cfg)
     raise ValueError(f"unknown profile {cfg.profile!r}")  # pragma: no cover
 
 
@@ -372,5 +386,79 @@ def build_fluxed_up_workflow(req: ImageRequest, cfg: Config) -> dict:
         FLUXED_UP_SAVE_NODE_ID: {
             "class_type": "SaveImage",
             "inputs": {"filename_prefix": filename_prefix, "images": ["8", 0]},
+        },
+    }
+
+
+def build_qwen_image_2512_workflow(req: ImageRequest, cfg: Config) -> dict:
+    """Mirror of ComfyUI's ``image_qwen_image`` template (December 2025 release).
+
+    Qwen-Image is a separate model family from Flux — it uses Qwen 2.5 VL 7B as
+    the text encoder (``CLIPLoader`` ``type=qwen_image``, NOT the Qwen3 encoders
+    used by Flux 2 Klein), its own VAE, and ``ModelSamplingAuraFlow`` with
+    sigma shift 3.1 (different from Chroma's 1.0). Sampling is plain
+    ``KSampler`` with ``euler`` + ``simple`` — no custom sampler chain needed.
+
+    Like Chroma1, Qwen-Image supports real CFG and a real negative prompt:
+    ``req.cfg`` flows into KSampler and ``req.negative_prompt`` is encoded by a
+    second ``CLIPTextEncode``. The official recipe recommends ~20-50 steps at
+    cfg=4.0 for the base 2512 model (without the 2-step Turbo LoRA).
+    """
+    filename_prefix = sanitize_name(req.name)
+    return {
+        "1": {
+            "class_type": "UNETLoader",
+            "inputs": {"unet_name": cfg.qwen_unet, "weight_dtype": "fp8_e4m3fn"},
+        },
+        "2": {
+            "class_type": "CLIPLoader",
+            "inputs": {"clip_name": cfg.qwen_clip, "type": "qwen_image"},
+        },
+        "3": {
+            "class_type": "VAELoader",
+            "inputs": {"vae_name": cfg.qwen_vae},
+        },
+        "4": {
+            "class_type": "ModelSamplingAuraFlow",
+            "inputs": {"model": ["1", 0], "shift": QWEN_IMAGE_SHIFT},
+        },
+        "5": {
+            "class_type": "CLIPTextEncode",
+            "inputs": {"clip": ["2", 0], "text": req.prompt},
+        },
+        "6": {
+            "class_type": "CLIPTextEncode",
+            "inputs": {"clip": ["2", 0], "text": req.negative_prompt or ""},
+        },
+        "7": {
+            "class_type": "EmptySD3LatentImage",
+            "inputs": {
+                "width": req.width,
+                "height": req.height,
+                "batch_size": 1,
+            },
+        },
+        "8": {
+            "class_type": "KSampler",
+            "inputs": {
+                "seed": req.seed,
+                "steps": req.steps,
+                "cfg": req.cfg,
+                "sampler_name": QWEN_IMAGE_SAMPLER,
+                "scheduler": QWEN_IMAGE_SCHEDULER,
+                "denoise": 1,
+                "model": ["4", 0],
+                "positive": ["5", 0],
+                "negative": ["6", 0],
+                "latent_image": ["7", 0],
+            },
+        },
+        "9": {
+            "class_type": "VAEDecode",
+            "inputs": {"samples": ["8", 0], "vae": ["3", 0]},
+        },
+        QWEN_IMAGE_SAVE_NODE_ID: {
+            "class_type": "SaveImage",
+            "inputs": {"filename_prefix": filename_prefix, "images": ["9", 0]},
         },
     }

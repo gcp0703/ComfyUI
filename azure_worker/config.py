@@ -9,11 +9,13 @@ PROFILE_FLUX1_DEV = "flux1-dev"
 PROFILE_FLUX2_KLEIN = "flux2-klein"
 PROFILE_CHROMA1 = "chroma1"
 PROFILE_FLUXED_UP = "fluxed-up"
+PROFILE_QWEN_IMAGE_2512 = "qwen-image-2512"
 KNOWN_PROFILES = (
     PROFILE_FLUX1_DEV,
     PROFILE_FLUX2_KLEIN,
     PROFILE_CHROMA1,
     PROFILE_FLUXED_UP,
+    PROFILE_QWEN_IMAGE_2512,
 )
 
 
@@ -43,6 +45,10 @@ class Config:
     chroma_vae: str
     # Fluxed Up profile (NSFW Flux 1 dev finetune — same arch, reuses flux1 CLIP-L/T5/VAE)
     fluxedup_unet: str
+    # Qwen-Image 2512 profile (Alibaba — Qwen 2.5 VL text encoder, own VAE, real CFG)
+    qwen_unet: str
+    qwen_clip: str
+    qwen_vae: str
     sas_expiry_hours: int = 24
     poll_interval_seconds: float = 2.0
     visibility_timeout_seconds: int = 300
@@ -100,6 +106,9 @@ def load_config() -> Config:
         chroma_clip=_require("COMFY_CHROMA_CLIP"),
         chroma_vae=_require("COMFY_CHROMA_VAE"),
         fluxedup_unet=_require("COMFY_FLUXEDUP_UNET"),
+        qwen_unet=_require("COMFY_QWEN_UNET"),
+        qwen_clip=_require("COMFY_QWEN_CLIP"),
+        qwen_vae=_require("COMFY_QWEN_VAE"),
         sas_expiry_hours=_optional_int("SAS_EXPIRY_HOURS", 24),
         poll_interval_seconds=_optional_float("POLL_INTERVAL_SECONDS", 2.0),
         visibility_timeout_seconds=_optional_int("VISIBILITY_TIMEOUT_SECONDS", 300),
