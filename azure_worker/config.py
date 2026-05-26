@@ -10,12 +10,14 @@ PROFILE_FLUX2_KLEIN = "flux2-klein"
 PROFILE_CHROMA1 = "chroma1"
 PROFILE_FLUXED_UP = "fluxed-up"
 PROFILE_QWEN_IMAGE_2512 = "qwen-image-2512"
+PROFILE_OPENFLUX1 = "openflux1"
 KNOWN_PROFILES = (
     PROFILE_FLUX1_DEV,
     PROFILE_FLUX2_KLEIN,
     PROFILE_CHROMA1,
     PROFILE_FLUXED_UP,
     PROFILE_QWEN_IMAGE_2512,
+    PROFILE_OPENFLUX1,
 )
 
 
@@ -49,6 +51,8 @@ class Config:
     qwen_unet: str
     qwen_clip: str
     qwen_vae: str
+    # OpenFLUX.1 profile (de-distilled Flux 1 schnell — same arch, real CFG; reuses flux1 CLIP-L/T5/VAE)
+    openflux_unet: str
     sas_expiry_hours: int = 24
     poll_interval_seconds: float = 2.0
     visibility_timeout_seconds: int = 300
@@ -109,6 +113,7 @@ def load_config() -> Config:
         qwen_unet=_require("COMFY_QWEN_UNET"),
         qwen_clip=_require("COMFY_QWEN_CLIP"),
         qwen_vae=_require("COMFY_QWEN_VAE"),
+        openflux_unet=_require("COMFY_OPENFLUX_UNET"),
         sas_expiry_hours=_optional_int("SAS_EXPIRY_HOURS", 24),
         poll_interval_seconds=_optional_float("POLL_INTERVAL_SECONDS", 2.0),
         visibility_timeout_seconds=_optional_int("VISIBILITY_TIMEOUT_SECONDS", 300),

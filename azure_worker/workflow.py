@@ -1,6 +1,6 @@
 """ComfyUI workflow builders.
 
-Five profiles are supported, selected at startup via `COMFY_PROFILE`:
+Six profiles are supported, selected at startup via `COMFY_PROFILE`:
 
 - ``flux1-dev`` — the classic Flux 1 dev pipeline (UNETLoader + DualCLIPLoader
   with clip_l + T5-XXL + the Flux 1 VAE), shaped to match the official
@@ -21,6 +21,11 @@ Five profiles are supported, selected at startup via `COMFY_PROFILE`:
   fp8 + CLIPLoader(type=qwen_image) with Qwen 2.5 VL 7B + its own VAE,
   ``ModelSamplingAuraFlow`` (sigma shift 3.1), stock KSampler (euler/simple).
   Like chroma1, honors ``req.cfg`` and ``req.negative_prompt``.
+- ``openflux1`` — ostris/OpenFLUX.1, a de-distilled Flux 1 schnell. Same Flux 1
+  architecture as flux1-dev (reuses CLIP-L + T5-XXL + ae.safetensors VAE) but
+  loads the OpenFLUX UNet in fp8 mode and drives KSampler with real ``req.cfg``
+  + a real second ``CLIPTextEncode`` for ``req.negative_prompt`` instead of
+  ``ConditioningZeroOut``.
 
 A single ``build_workflow(req, cfg)`` dispatcher picks the right builder.
 """
@@ -32,6 +37,7 @@ from .config import (
     PROFILE_FLUX1_DEV,
     PROFILE_FLUX2_KLEIN,
     PROFILE_FLUXED_UP,
+    PROFILE_OPENFLUX1,
     PROFILE_QWEN_IMAGE_2512,
 )
 from .messages import ImageRequest, sanitize_name
@@ -44,6 +50,7 @@ FLUX2_SAVE_NODE_ID = "12"
 CHROMA1_SAVE_NODE_ID = "14"
 FLUXED_UP_SAVE_NODE_ID = "9"
 QWEN_IMAGE_SAVE_NODE_ID = "10"
+OPENFLUX1_SAVE_NODE_ID = "9"
 
 
 # Chroma sampling defaults baked into the workflow — these are not user-tunable
@@ -71,6 +78,8 @@ def build_workflow(req: ImageRequest, cfg: Config) -> dict:
         return build_fluxed_up_workflow(req, cfg)
     if cfg.profile == PROFILE_QWEN_IMAGE_2512:
         return build_qwen_image_2512_workflow(req, cfg)
+    if cfg.profile == PROFILE_OPENFLUX1:
+        return build_openflux1_workflow(req, cfg)
     raise ValueError(f"unknown profile {cfg.profile!r}")  # pragma: no cover
 
 
@@ -460,5 +469,80 @@ def build_qwen_image_2512_workflow(req: ImageRequest, cfg: Config) -> dict:
         QWEN_IMAGE_SAVE_NODE_ID: {
             "class_type": "SaveImage",
             "inputs": {"filename_prefix": filename_prefix, "images": ["9", 0]},
+        },
+    }
+
+
+def build_openflux1_workflow(req: ImageRequest, cfg: Config) -> dict:
+    """OpenFLUX.1 (ostris) — de-distilled Flux 1 schnell.
+
+    Architecturally identical to Flux 1 dev (same DualCLIPLoader with
+    clip_l + T5-XXL, same Flux 1 VAE ``ae.safetensors``) — only the UNet differs
+    and is loaded in fp8 mode. Unlike ``flux1-dev`` / ``fluxed-up``, the
+    distillation has been trained out, so the workflow uses **real CFG and a
+    real negative prompt**: ``req.cfg`` flows into KSampler and
+    ``req.negative_prompt`` is encoded by a second ``CLIPTextEncode`` (no
+    ``ConditioningZeroOut``).
+
+    Reuses ``cfg.flux1_clip_l`` / ``cfg.flux1_t5`` / ``cfg.flux1_vae`` since
+    those files are byte-identical for any Flux 1 derivative. Recommended
+    request params per the ostris model card: ``cfg≈3.5``, ``steps=20`` and up.
+    """
+    filename_prefix = sanitize_name(req.name)
+    return {
+        "1": {
+            "class_type": "UNETLoader",
+            "inputs": {"unet_name": cfg.openflux_unet, "weight_dtype": "fp8_e4m3fn"},
+        },
+        "2": {
+            "class_type": "DualCLIPLoader",
+            "inputs": {
+                "clip_name1": cfg.flux1_clip_l,
+                "clip_name2": cfg.flux1_t5,
+                "type": "flux",
+            },
+        },
+        "3": {
+            "class_type": "VAELoader",
+            "inputs": {"vae_name": cfg.flux1_vae},
+        },
+        "4": {
+            "class_type": "CLIPTextEncode",
+            "inputs": {"clip": ["2", 0], "text": req.prompt},
+        },
+        "5": {
+            "class_type": "CLIPTextEncode",
+            "inputs": {"clip": ["2", 0], "text": req.negative_prompt or ""},
+        },
+        "6": {
+            "class_type": "EmptySD3LatentImage",
+            "inputs": {
+                "width": req.width,
+                "height": req.height,
+                "batch_size": 1,
+            },
+        },
+        "7": {
+            "class_type": "KSampler",
+            "inputs": {
+                "seed": req.seed,
+                "steps": req.steps,
+                "cfg": req.cfg,
+                "sampler_name": "euler",
+                "scheduler": "simple",
+                "denoise": 1,
+                "model": ["1", 0],
+                "positive": ["4", 0],
+                "negative": ["5", 0],
+                "latent_image": ["6", 0],
+            },
+        },
+        "8": {
+            "class_type": "VAEDecode",
+            "inputs": {"samples": ["7", 0], "vae": ["3", 0]},
+        },
+        OPENFLUX1_SAVE_NODE_ID: {
+            "class_type": "SaveImage",
+            "inputs": {"filename_prefix": filename_prefix, "images": ["8", 0]},
         },
     }

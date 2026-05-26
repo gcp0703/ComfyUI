@@ -5,7 +5,7 @@ Queue, runs them through ComfyUI in-process, uploads the resulting PNG to
 Azure Blob Storage, and posts a result message (with a SAS URL) to a second
 Storage Queue.
 
-Five model profiles are supported and selected at startup via `COMFY_PROFILE`:
+Six model profiles are supported and selected at startup via `COMFY_PROFILE`:
 
 | Profile | Models | Notes |
 |---|---|---|
@@ -14,8 +14,9 @@ Five model profiles are supported and selected at startup via `COMFY_PROFILE`:
 | `chroma1` | `Chroma1-HD-fp8mixed.safetensors` + CLIPLoader(type=chroma) with T5-XXL + Flux 1 VAE | De-distilled — **`cfg` and `negative_prompt` are honored.** Beta scheduler, Euler sampler, sigma shift 1.0 are baked in. |
 | `fluxed-up` | `fluxedUpFluxNSFW_40DevFp8.safetensors` (fp8) + reuses flux1 DualCLIP + Flux 1 VAE | NSFW Flux 1 dev finetune. Same guidance-distilled driving as `flux1-dev` — `cfg` and `negative_prompt` are no-ops. |
 | `qwen-image-2512` | `qwen_image_2512_fp8_e4m3fn.safetensors` + CLIPLoader(type=qwen_image) with Qwen 2.5 VL 7B + `qwen_image_vae.safetensors` | Alibaba Qwen-Image (Dec 2025). **`cfg` and `negative_prompt` are honored.** Euler + simple, sigma shift 3.1. Recommended: steps=20-50, cfg=4.0. |
+| `openflux1` | `openflux1-v0.1.0-fp8.safetensors` (fp8) + reuses flux1 DualCLIP + Flux 1 VAE | ostris/OpenFLUX.1 — de-distilled Flux 1 schnell. Same Flux 1 architecture. **`cfg` and `negative_prompt` are honored.** Recommended: cfg≈3.5, steps≥20. |
 
-All five profile blocks must be filled in `.env`; only the active profile is
+All six profile blocks must be filled in `.env`; only the active profile is
 actually loaded into VRAM. Switching profiles requires restarting the worker.
 
 The worker uses ComfyUI's production execution path — it boots a
@@ -39,7 +40,7 @@ pip install -r azure_worker/requirements.txt
 | `AZURE_INBOUND_QUEUE` | yes | — | Storage Queue name for incoming requests. |
 | `AZURE_OUTBOUND_QUEUE` | yes | — | Storage Queue name for results. |
 | `AZURE_BLOB_CONTAINER` | yes | — | Blob container for generated PNGs. |
-| `COMFY_PROFILE` | yes | — | `flux1-dev`, `flux2-klein`, `chroma1`, `fluxed-up`, or `qwen-image-2512`. |
+| `COMFY_PROFILE` | yes | — | `flux1-dev`, `flux2-klein`, `chroma1`, `fluxed-up`, `qwen-image-2512`, or `openflux1`. |
 | `COMFY_FLUX1_UNET` | yes | — | Flux 1 UNet under `models/diffusion_models/` (e.g. `flux1-dev.safetensors`). |
 | `COMFY_FLUX1_CLIP_L` | yes | — | CLIP-L text encoder under `models/text_encoders/`. |
 | `COMFY_FLUX1_T5` | yes | — | T5-XXL text encoder under `models/text_encoders/`. |
@@ -54,6 +55,7 @@ pip install -r azure_worker/requirements.txt
 | `COMFY_QWEN_UNET` | yes | — | Qwen-Image UNet under `models/diffusion_models/` (e.g. `qwen_image_2512_fp8_e4m3fn.safetensors`). |
 | `COMFY_QWEN_CLIP` | yes | — | Qwen 2.5 VL 7B text encoder under `models/text_encoders/` (e.g. `qwen_2.5_vl_7b_fp8_scaled.safetensors`). |
 | `COMFY_QWEN_VAE` | yes | — | Qwen-Image VAE under `models/vae/` (e.g. `qwen_image_vae.safetensors`). |
+| `COMFY_OPENFLUX_UNET` | yes | — | OpenFLUX.1 UNet under `models/diffusion_models/` (e.g. `openflux1-v0.1.0-fp8.safetensors`). Reuses the flux1 CLIP-L / T5 / VAE — no separate text-encoder/VAE env vars. |
 | `SAS_EXPIRY_HOURS` | no | `24` | Lifetime of generated SAS URLs. |
 | `POLL_INTERVAL_SECONDS` | no | `2.0` | How often to poll an empty inbound queue. |
 | `VISIBILITY_TIMEOUT_SECONDS` | no | `300` | Inbound message visibility timeout while a job runs. |
@@ -88,12 +90,14 @@ ComfyUI argparser never sees foreign options.
 
 - `job_id`, `negative_prompt`, `seed`, `steps`, `cfg` are optional.
 - `width` and `height` must be in `[64, 4096]` and multiples of 16.
-- `negative_prompt` and `cfg` are **honored on `chroma1` and `qwen-image-2512`**.
-  Flux 1 dev and Fluxed Up both use `KSampler(cfg=1)` with `ConditioningZeroOut`;
-  Flux 2 Klein uses `BasicGuider` with no negative path. Recommended values:
+- `negative_prompt` and `cfg` are **honored on `chroma1`, `qwen-image-2512`,
+  and `openflux1`**. Flux 1 dev and Fluxed Up both use `KSampler(cfg=1)` with
+  `ConditioningZeroOut`; Flux 2 Klein uses `BasicGuider` with no negative path.
+  Recommended values:
   - **Chroma**: `steps=26, cfg=3.5` (workable range 3.5–7), native 1024² or 1152².
   - **Qwen-Image 2512**: `steps=20–50, cfg=4.0`, native 1328² (aspect-ratio
     sweet spots: 1664×928 16:9, 1472×1104 4:3, 1584×1056 3:2).
+  - **OpenFLUX.1**: `steps≥20, cfg≈3.5`, native 1024² (any Flux 1 resolution works).
 - A missing/invalid message produces an error result and is deleted from the
   inbound queue (no retries yet).
 
@@ -140,6 +144,7 @@ $env:COMFY_FLUXEDUP_UNET = "fluxedUpFluxNSFW_40DevFp8.safetensors"
 $env:COMFY_QWEN_UNET = "qwen_image_2512_fp8_e4m3fn.safetensors"
 $env:COMFY_QWEN_CLIP = "qwen_2.5_vl_7b_fp8_scaled.safetensors"
 $env:COMFY_QWEN_VAE = "qwen_image_vae.safetensors"
+$env:COMFY_OPENFLUX_UNET = "openflux1-v0.1.0-fp8.safetensors"
 
 # Create the queues + container with `az storage` against Azurite, then:
 python -m azure_worker.main

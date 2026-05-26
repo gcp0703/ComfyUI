@@ -10,6 +10,7 @@ from azure_worker.config import (
     PROFILE_FLUX1_DEV,
     PROFILE_FLUX2_KLEIN,
     PROFILE_FLUXED_UP,
+    PROFILE_OPENFLUX1,
     PROFILE_QWEN_IMAGE_2512,
     Config,
 )
@@ -24,11 +25,13 @@ from azure_worker.workflow import (
     FLUX1_SAVE_NODE_ID,
     FLUX2_SAVE_NODE_ID,
     FLUXED_UP_SAVE_NODE_ID,
+    OPENFLUX1_SAVE_NODE_ID,
     QWEN_IMAGE_SAVE_NODE_ID,
     build_chroma1_workflow,
     build_flux1_dev_workflow,
     build_flux2_klein_workflow,
     build_fluxed_up_workflow,
+    build_openflux1_workflow,
     build_qwen_image_2512_workflow,
     build_workflow,
 )
@@ -55,6 +58,7 @@ def _cfg(profile: str) -> Config:
         qwen_unet="qwen_image_2512_fp8_e4m3fn.safetensors",
         qwen_clip="qwen_2.5_vl_7b_fp8_scaled.safetensors",
         qwen_vae="qwen_image_vae.safetensors",
+        openflux_unet="openflux1-v0.1.0-fp8.safetensors",
     )
 
 
@@ -308,6 +312,60 @@ def test_dispatcher_picks_qwen_image_for_qwen_image_profile():
     wf = build_workflow(req, _cfg(PROFILE_QWEN_IMAGE_2512))
     assert wf["2"]["inputs"]["type"] == "qwen_image"
     assert wf[QWEN_IMAGE_SAVE_NODE_ID]["class_type"] == "SaveImage"
+
+
+# -- OpenFLUX.1 workflow --
+
+def test_openflux1_workflow_shape():
+    req = ImageRequest.from_json(_sample_payload(
+        prompt="dragon",
+        negative_prompt="blurry, low quality",
+        seed=99,
+        width=1024,
+        height=1024,
+        steps=20,
+        cfg=3.5,
+    ))
+    wf = build_openflux1_workflow(req, _cfg(PROFILE_OPENFLUX1))
+
+    # OpenFLUX UNet, loaded in fp8 (the published file is fp8-quantized)
+    assert wf["1"]["class_type"] == "UNETLoader"
+    assert wf["1"]["inputs"]["unet_name"] == "openflux1-v0.1.0-fp8.safetensors"
+    assert wf["1"]["inputs"]["weight_dtype"] == "fp8_e4m3fn"
+
+    # Reuses flux1 CLIP-L + T5 + VAE (same Flux 1 architecture)
+    assert wf["2"]["class_type"] == "DualCLIPLoader"
+    assert wf["2"]["inputs"]["clip_name1"] == "clip_l.safetensors"
+    assert wf["2"]["inputs"]["clip_name2"] == "t5xxl_fp16.safetensors"
+    assert wf["2"]["inputs"]["type"] == "flux"
+    assert wf["3"]["inputs"]["vae_name"] == "ae.safetensors"
+
+    # Real negative prompt (de-distilled — no ConditioningZeroOut)
+    assert wf["4"]["inputs"]["text"] == "dragon"
+    assert wf["5"]["class_type"] == "CLIPTextEncode"
+    assert wf["5"]["inputs"]["text"] == "blurry, low quality"
+
+    # Real CFG flowing into KSampler
+    ks = wf["7"]
+    assert ks["class_type"] == "KSampler"
+    assert ks["inputs"]["seed"] == 99
+    assert ks["inputs"]["steps"] == 20
+    assert ks["inputs"]["cfg"] == 3.5
+    assert ks["inputs"]["sampler_name"] == "euler"
+    assert ks["inputs"]["scheduler"] == "simple"
+    assert ks["inputs"]["positive"] == ["4", 0]
+    assert ks["inputs"]["negative"] == ["5", 0]
+
+    assert wf[OPENFLUX1_SAVE_NODE_ID]["class_type"] == "SaveImage"
+    assert wf[OPENFLUX1_SAVE_NODE_ID]["inputs"]["filename_prefix"] == "test-image"
+
+
+def test_dispatcher_picks_openflux1_for_openflux1_profile():
+    req = ImageRequest.from_json(_sample_payload())
+    wf = build_workflow(req, _cfg(PROFILE_OPENFLUX1))
+    assert wf["1"]["inputs"]["unet_name"] == "openflux1-v0.1.0-fp8.safetensors"
+    # Distinguishes from flux1-dev (which uses ConditioningZeroOut at node 5)
+    assert wf["5"]["class_type"] == "CLIPTextEncode"
 
 
 # -- Result message --
