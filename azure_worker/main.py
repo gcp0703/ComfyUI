@@ -19,6 +19,8 @@ from dotenv import load_dotenv
 from . import azure_io
 from .comfy_runner import ComfyJobError, ComfyRunner
 from .config import ConfigError, load_config
+from .llm_messages import LlmMessageValidationError, LlmRequest, LlmResult
+from .llm_runner import LlmJobError, LlmRunner
 from .messages import ImageRequest, ImageResult, MessageValidationError, sanitize_name
 from .workflow import build_workflow
 
@@ -37,6 +39,49 @@ def _install_signal_handlers() -> None:
     signal.signal(signal.SIGINT, handler)
     if hasattr(signal, "SIGTERM"):
         signal.signal(signal.SIGTERM, handler)
+
+
+def _process_one_llm(llm: LlmRunner, clients: azure_io.AzureClients) -> bool:
+    """Return True if an LLM message was processed (success or failure), False if queue empty."""
+    msg = azure_io.receive_one_llm(clients)
+    if msg is None:
+        return False
+
+    raw_body = azure_io.message_body_text(msg)
+    req: Optional[LlmRequest] = None
+    try:
+        req = LlmRequest.from_json(raw_body)
+        log.info(
+            "llm job %s model=%s thinking=%s temp=%.2f max_tokens=%d",
+            req.job_id, req.model, req.thinking, req.temperature, req.max_tokens,
+        )
+        completion = llm.run(req)
+        result = LlmResult.success(
+            req,
+            completion=completion.completion,
+            reasoning=completion.reasoning,
+            prompt_tokens=completion.prompt_tokens,
+            completion_tokens=completion.completion_tokens,
+            finish_reason=completion.finish_reason,
+        )
+        azure_io.send_llm_result(clients, result)
+        log.info(
+            "llm job %s complete (finish=%s, tokens=%s/%s)",
+            req.job_id, completion.finish_reason,
+            completion.prompt_tokens, completion.completion_tokens,
+        )
+    except LlmMessageValidationError as e:
+        log.warning("invalid llm message (dequeue_count=%s): %s", msg.dequeue_count, e)
+        azure_io.send_llm_result(clients, LlmResult.error_for(None, str(e)))
+    except (LlmJobError, Exception) as e:  # noqa: BLE001 - we want every failure on the result queue
+        log.exception("llm job failed: %s", e)
+        azure_io.send_llm_result(clients, LlmResult.error_for(req, str(e)))
+    finally:
+        try:
+            azure_io.delete_llm_message(clients, msg)
+        except Exception:
+            log.exception("failed to delete inbound llm message %s", msg.id)
+    return True
 
 
 def _process_one(runner: ComfyRunner, clients: azure_io.AzureClients) -> bool:
@@ -91,17 +136,27 @@ def main() -> int:
 
     log.info("starting ComfyUI runner (profile=%s)", cfg.profile)
     runner = ComfyRunner()
+    llm_runner = LlmRunner(cfg.ollama_url, cfg.llm_request_timeout_seconds)
     clients = azure_io.build_clients(cfg)
     _install_signal_handlers()
 
-    log.info("polling queue %r every %.1fs", cfg.inbound_queue, cfg.poll_interval_seconds)
+    log.info(
+        "polling llm-queue %r (priority) then image-queue %r every %.1fs",
+        cfg.llm_inbound_queue, cfg.inbound_queue, cfg.poll_interval_seconds,
+    )
     while not _shutdown:
-        processed = _process_one(runner, clients)
-        if not processed:
-            time.sleep(cfg.poll_interval_seconds)
+        # LLM-first priority: drain the LLM queue before touching the image queue.
+        # A flood of LLM requests will starve image jobs, which is the intended
+        # ordering — image jobs are minutes long, LLM jobs are seconds.
+        if _process_one_llm(llm_runner, clients):
+            continue
+        if _process_one(runner, clients):
+            continue
+        time.sleep(cfg.poll_interval_seconds)
 
     log.info("shutdown complete")
     runner.close()
+    llm_runner.close()
     return 0
 
 

@@ -1,9 +1,16 @@
-# azure_worker — Azure Storage Queue ⇄ ComfyUI bridge
+# azure_worker — Azure Storage Queue ⇄ ComfyUI + Ollama bridge
 
-A small worker that consumes text-to-image requests from an Azure Storage
-Queue, runs them through ComfyUI in-process, uploads the resulting PNG to
-Azure Blob Storage, and posts a result message (with a SAS URL) to a second
-Storage Queue.
+A small worker that consumes two kinds of requests off Azure Storage Queues:
+
+1. **Image-generation requests** — runs them through ComfyUI in-process,
+   uploads the resulting PNG to Azure Blob Storage, posts a result message
+   (with a SAS URL) to a second Storage Queue.
+2. **LLM chat-completion requests** — forwards them to a separately-running
+   Ollama daemon (native `/api/chat` API), and posts the completion back to
+   a second Storage Queue (spilling oversize completions to Blob Storage).
+
+The LLM queue is polled **first every iteration**; image jobs only run when
+the LLM queue is empty.
 
 Six model profiles are supported and selected at startup via `COMFY_PROFILE`:
 
@@ -37,9 +44,13 @@ pip install -r azure_worker/requirements.txt
 | Variable | Required | Default | Notes |
 |---|---|---|---|
 | `AZURE_STORAGE_CONNECTION_STRING` | yes | — | Must include `AccountKey` so the worker can mint SAS tokens. |
-| `AZURE_INBOUND_QUEUE` | yes | — | Storage Queue name for incoming requests. |
-| `AZURE_OUTBOUND_QUEUE` | yes | — | Storage Queue name for results. |
-| `AZURE_BLOB_CONTAINER` | yes | — | Blob container for generated PNGs. |
+| `AZURE_INBOUND_QUEUE` | yes | — | Storage Queue name for incoming image requests. |
+| `AZURE_OUTBOUND_QUEUE` | yes | — | Storage Queue name for image results. |
+| `AZURE_BLOB_CONTAINER` | yes | — | Blob container for generated PNGs (and overflow LLM completions). |
+| `LLM_INBOUND_QUEUE` | yes | — | Storage Queue name for incoming LLM requests (polled with priority over images). |
+| `LLM_OUTBOUND_QUEUE` | yes | — | Storage Queue name for LLM results. |
+| `OLLAMA_URL` | yes | — | Base URL of a running Ollama daemon (e.g. `http://localhost:11434`). Worker POSTs to `{OLLAMA_URL}/api/chat`. |
+| `LLM_REQUEST_TIMEOUT_SECONDS` | no | `300` | Per-request HTTP timeout for the Ollama call. |
 | `COMFY_PROFILE` | yes | — | `flux1-dev`, `flux2-klein`, `chroma1`, `fluxed-up`, `qwen-image-2512`, or `openflux1`. |
 | `COMFY_FLUX1_UNET` | yes | — | Flux 1 UNet under `models/diffusion_models/` (e.g. `flux1-dev.safetensors`). |
 | `COMFY_FLUX1_CLIP_L` | yes | — | CLIP-L text encoder under `models/text_encoders/`. |
@@ -152,6 +163,45 @@ python -m azure_worker.main
 
 Enqueue `sample_request.json` (base64-encoded) onto the inbound queue and
 watch the outbound queue for the result.
+
+## LLM pipeline
+
+The worker also drains an LLM request queue (polled before the image queue
+every loop iteration). It does NOT run the LLM itself — it makes HTTP calls
+to a separately-running Ollama daemon.
+
+Ollama runs natively on Windows. Install + run:
+
+```
+winget install Ollama.Ollama        # or download from ollama.com
+ollama pull qwen3.6:35b-a3b-q4_K_M  # or any other model you want to serve
+# daemon starts automatically (Windows tray); manual: `ollama serve`
+```
+
+Then enqueue messages onto `llm-requests`:
+
+```json
+{
+  "job_id": 12345,
+  "name": "summarize-meeting",
+  "system_prompt": "You are a concise notes assistant.",
+  "user_prompt": "Summarize the following transcript in three bullets: ...",
+  "model": "qwen3.6:35b-a3b-q4_K_M",
+  "thinking": false,
+  "temperature": 0.3,
+  "max_tokens": 512
+}
+```
+
+Results land on `llm-results` as JSON with `completion`, `reasoning`, token
+counts, and `finish_reason`. Completions larger than ~50 KiB spill to a JSON
+blob with a SAS URL. See `SPEC.md` §13–§14 for the full contract.
+
+The worker uses Ollama's **native `/api/chat`** endpoint rather than the
+OpenAI-compatible `/v1/chat/completions`. Reason: only the native endpoint
+honors the `think` toggle that controls reasoning on Qwen3-family GGUFs —
+the OpenAI-compat layer silently ignores `chat_template_kwargs`, `think`,
+and `/no_think` directives, and the model keeps reasoning regardless.
 
 ## Out of scope
 

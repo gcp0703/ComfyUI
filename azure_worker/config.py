@@ -53,6 +53,13 @@ class Config:
     qwen_vae: str
     # OpenFLUX.1 profile (de-distilled Flux 1 schnell — same arch, real CFG; reuses flux1 CLIP-L/T5/VAE)
     openflux_unet: str
+    # LLM-side queues + Ollama HTTP endpoint (separate workload, polled with
+    # priority over the image queue in the main loop). Uses Ollama's native
+    # /api/chat (not OpenAI-compat) so the `think` toggle works on Qwen3.
+    llm_inbound_queue: str
+    llm_outbound_queue: str
+    ollama_url: str
+    llm_request_timeout_seconds: int = 300
     sas_expiry_hours: int = 24
     poll_interval_seconds: float = 2.0
     visibility_timeout_seconds: int = 300
@@ -114,6 +121,10 @@ def load_config() -> Config:
         qwen_clip=_require("COMFY_QWEN_CLIP"),
         qwen_vae=_require("COMFY_QWEN_VAE"),
         openflux_unet=_require("COMFY_OPENFLUX_UNET"),
+        llm_inbound_queue=_require("LLM_INBOUND_QUEUE"),
+        llm_outbound_queue=_require("LLM_OUTBOUND_QUEUE"),
+        ollama_url=_require("OLLAMA_URL"),
+        llm_request_timeout_seconds=_optional_int("LLM_REQUEST_TIMEOUT_SECONDS", 300),
         sas_expiry_hours=_optional_int("SAS_EXPIRY_HOURS", 24),
         poll_interval_seconds=_optional_float("POLL_INTERVAL_SECONDS", 2.0),
         visibility_timeout_seconds=_optional_int("VISIBILITY_TIMEOUT_SECONDS", 300),

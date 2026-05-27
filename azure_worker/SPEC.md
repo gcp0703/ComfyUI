@@ -1,9 +1,15 @@
-# Image Generation Queue — Client Specification
+# Worker Queue — Client Specification
 
-Contract for any application that wants to **request an image generation** and
-**receive the result**, by talking to the two Azure Storage Queues backing the
-ComfyUI worker. This document is self-contained: a developer writing a client
-should not need to read anything else.
+Contract for any application that wants to **request an image generation** or
+**run an LLM chat completion**, by talking to the four Azure Storage Queues
+backing the worker. This document is self-contained: a developer writing a
+client should not need to read anything else.
+
+The worker exposes two independent pipelines:
+- **Image pipeline** — `image-requests` → ComfyUI → Blob → `image-results` (§5–§6).
+- **LLM pipeline** — `llm-requests` → Ollama (native `/api/chat` HTTP) → `llm-results` (§13–§14).
+  The LLM queue is **polled first every iteration**; image jobs only run when
+  the LLM queue is empty.
 
 ---
 
@@ -30,9 +36,11 @@ names as configuration; don't hard-code them past a config file.
 | Resource | Name | Endpoint |
 |---|---|---|
 | Storage account | `nomadimagegen` | `*.core.windows.net` |
-| Inbound queue (requests) | `image-requests` | `https://nomadimagegen.queue.core.windows.net/image-requests` |
-| Outbound queue (results) | `image-results` | `https://nomadimagegen.queue.core.windows.net/image-results` |
-| Blob container (PNGs) | `generated-images` | `https://nomadimagegen.blob.core.windows.net/generated-images/` |
+| Image inbound queue | `image-requests` | `https://nomadimagegen.queue.core.windows.net/image-requests` |
+| Image outbound queue | `image-results` | `https://nomadimagegen.queue.core.windows.net/image-results` |
+| LLM inbound queue | `llm-requests` | `https://nomadimagegen.queue.core.windows.net/llm-requests` |
+| LLM outbound queue | `llm-results` | `https://nomadimagegen.queue.core.windows.net/llm-results` |
+| Blob container (PNGs + LLM overflow) | `generated-images` | `https://nomadimagegen.blob.core.windows.net/generated-images/` |
 
 Region: `centralus`. Redundancy: `Standard_LRS`. TLS 1.2 minimum, HTTPS only,
 public blob access disabled.
@@ -380,3 +388,169 @@ any absent-or-unknown-status as a failure.
 
 Removing or renaming a field, or changing the type/encoding of an existing
 field, requires a coordinated migration and a new spec version.
+
+---
+
+## 13. LLM request schema (producer → `llm-requests`)
+
+The LLM queue runs **chat completions** through an Ollama daemon using its
+native `POST /api/chat` endpoint. Same base64 envelope and 64 KiB cap as
+the image queue (§4).
+
+```json
+{
+  "job_id": "string or integer, optional",
+  "name": "string, optional",
+  "system_prompt": "string, optional, default \"\"",
+  "user_prompt": "string, required",
+  "model": "string, required",
+  "thinking": "boolean or yes/no string, optional, default false",
+  "temperature": "number 0.0-2.0, optional, default 1.0",
+  "max_tokens": "integer 1-32768, optional, default 2048"
+}
+```
+
+### Field rules
+
+| Field | Type | Required | Constraints |
+|---|---|---|---|
+| `job_id` | int or string | no | Accepted in either form; coerced to string internally. Worker generates a UUID if omitted. **Provide your own** to correlate requests with results. |
+| `name` | string | no | Optional human-readable label; surfaces in worker logs and in the result message. |
+| `system_prompt` | string | no | Max 32000 chars. Empty/omitted → no system message is sent to vLLM. |
+| `user_prompt` | string | **yes** | Non-empty. Max 32000 chars. |
+| `model` | string | **yes** | Must match a model pulled into the Ollama daemon (verify with `ollama list` or `GET {OLLAMA_URL}/api/tags`). Example: `qwen3.6:35b-a3b-q4_K_M`. Mismatch → error result with Ollama's error body. |
+| `thinking` | bool or string | no | `true`/`false`, or case-insensitive `yes`/`no`/`true`/`false`/`1`/`0`/`on`/`off`. Sets Ollama's `think` flag — honored by Qwen3-family reasoning GGUFs, ignored by others. **Default `false`**: Qwen3.6 *defaults to thinking ON*, so leaving it unspecified will burn tokens on chain-of-thought; pass `false` explicitly for short answers. |
+| `temperature` | number | no | 0.0 ≤ t ≤ 2.0. Default 1.0. String like `"0.7"` is also accepted. The field name `temp` is accepted as a back-compat alias. |
+| `max_tokens` | int | no | 1 ≤ n ≤ 32768. Default 2048. **Set this thoughtfully** — large completions force the result to spill to Blob Storage (§14). |
+
+### Example
+
+```json
+{
+  "job_id": "9c4f7e90-4f4a-4d6e-9b04-39d1b62b3a01",
+  "name": "summarize-meeting",
+  "system_prompt": "You are a concise meeting-notes assistant.",
+  "user_prompt": "Summarize the following transcript in three bullet points: ...",
+  "model": "qwen3.6:35b-a3b-q4_K_M",
+  "thinking": false,
+  "temperature": 0.3,
+  "max_tokens": 512
+}
+```
+
+### Validation failures
+
+Same policy as the image queue: malformed/missing/out-of-range fields produce
+an `error` result and the inbound message is deleted (no retries).
+
+---
+
+## 14. LLM result schema (consumer ← `llm-results`)
+
+```json
+{
+  "job_id": "string",
+  "name": "string",
+  "status": "success" | "error",
+  "model": "string",
+  "completion": "string | null",
+  "reasoning": "string | null",
+  "prompt_tokens": "integer | null",
+  "completion_tokens": "integer | null",
+  "finish_reason": "stop | length | tool_calls | content_filter | null",
+  "blob_url": "string | null",
+  "blob_name": "string | null",
+  "error": "string | null"
+}
+```
+
+### Success result — inline
+
+For typical short completions, `completion` carries the text directly and
+`blob_url`/`blob_name` are `null`:
+
+```json
+{
+  "job_id": "9c4f7e90-4f4a-4d6e-9b04-39d1b62b3a01",
+  "name": "summarize-meeting",
+  "status": "success",
+  "model": "qwen3.6:35b-a3b-q4_K_M",
+  "completion": "- Agreed timeline...\n- Budget approved...\n- Next meeting Friday.",
+  "reasoning": null,
+  "prompt_tokens": 412,
+  "completion_tokens": 88,
+  "finish_reason": "stop",
+  "blob_url": null,
+  "blob_name": null,
+  "error": null
+}
+```
+
+### Success result — spilled to blob
+
+If the total JSON would exceed ~50 KiB (Storage Queue's 64 KiB cap minus
+envelope overhead), the worker uploads `{"completion": ..., "reasoning": ...}`
+as a JSON blob and replaces the inline fields with a SAS URL:
+
+```json
+{
+  "job_id": "...",
+  "name": "long-essay",
+  "status": "success",
+  "model": "qwen3.6:35b-a3b-q4_K_M",
+  "completion": null,
+  "reasoning": null,
+  "prompt_tokens": 1024,
+  "completion_tokens": 7400,
+  "finish_reason": "stop",
+  "blob_url": "https://nomadimagegen.blob.core.windows.net/generated-images/llm/<job_id>.json?<SAS>",
+  "blob_name": "llm/<job_id>.json",
+  "error": null
+}
+```
+
+The blob is a single JSON object: `{"completion": "...", "reasoning": "..."}`.
+Same 24 h SAS lifetime as image blobs.
+
+### Reasoning content
+
+For reasoning-enabled models (Qwen3 family with `thinking: true`), `reasoning`
+carries the chain-of-thought separately from `completion`. Ollama returns it
+under `message.thinking` on `/api/chat`; the worker exposes it as `reasoning`
+in the result message. Most workloads should display `completion` to the end
+user and treat `reasoning` as debug-only.
+
+### Error result
+
+```json
+{
+  "job_id": "...",
+  "name": "...",
+  "status": "error",
+  "model": "...",
+  "completion": null,
+  "reasoning": null,
+  "prompt_tokens": null,
+  "completion_tokens": null,
+  "finish_reason": null,
+  "blob_url": null,
+  "blob_name": null,
+  "error": "ollama HTTP 404: {\"error\": \"model 'foo' not found\"}"
+}
+```
+
+Common errors:
+- `"'user_prompt' is required and must be a non-empty string"` — schema failure
+- `"'temperature'=3.0 must be in [0.0, 2.0]"` — validation failure
+- `"ollama HTTP 404: ..."` — model not pulled into the daemon
+- `"ollama request failed: ConnectionError"` — Ollama not running / wrong URL
+- `"ollama HTTP 400: {...}"` — daemon rejected the request body
+
+### Operational notes
+
+| Property | Value |
+|---|---|
+| Polling priority | LLM queue is polled **first every iteration**; image jobs only run when LLM queue is empty. |
+| Concurrency | Same worker process serializes both queues. One LLM call at a time, one image generation at a time. |
+| Ollama lifecycle | The worker does NOT start Ollama. Start it separately (`ollama serve`, or the Windows tray icon). Models must be pre-pulled with `ollama pull <name>`. |
+| Result correlation | Same pattern as images — generate `job_id` client-side. |

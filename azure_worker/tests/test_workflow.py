@@ -59,6 +59,9 @@ def _cfg(profile: str) -> Config:
         qwen_clip="qwen_2.5_vl_7b_fp8_scaled.safetensors",
         qwen_vae="qwen_image_vae.safetensors",
         openflux_unet="openflux1-v0.1.0-fp8.safetensors",
+        llm_inbound_queue="llm-requests",
+        llm_outbound_queue="llm-results",
+        ollama_url="http://localhost:11434",
     )
 
 
