@@ -124,12 +124,12 @@ A single JSON object:
 | `job_id` | string | no | If omitted, the worker generates a UUID. **Provide your own UUID** if you want to correlate requests with results — see §8. |
 | `name` | string | yes | Non-empty. Becomes the filename prefix for the generated PNG (sanitized — non-alphanumeric chars are replaced with `_`). Does not need to be unique. |
 | `prompt` | string | yes | Non-empty. Max 4000 chars. |
-| `negative_prompt` | string | no | Max 4000 chars. **Honored on `chroma1`, `qwen-image-2512`, and `openflux1`** (all three support real CFG with a real negative branch). **Ignored** on `flux1-dev` and `fluxed-up` (both use `ConditioningZeroOut`) and `flux2-klein` (uses `BasicGuider` — no negative path). |
+| `negative_prompt` | string | no | Max 4000 chars. **Honored on `chroma1`, `qwen-image-2512`, and `openflux1`** (all three support real CFG with a real negative branch). **Ignored** on `flux1-dev`, `fluxed-up`, and `qwen-rapid-aio` (all use `ConditioningZeroOut`) and `flux2-klein` (uses `BasicGuider` — no negative path). |
 | `width` | integer | yes | 64 ≤ w ≤ 4096, **multiple of 16**. |
 | `height` | integer | yes | 64 ≤ h ≤ 4096, **multiple of 16**. |
 | `seed` | integer | no | 64-bit unsigned. If omitted, the worker picks a random seed and returns it in the result so the run is reproducible. |
-| `steps` | integer | no | 1 ≤ steps ≤ 200. Default 20. Both Flux profiles work well at 20; `chroma1`'s recommended baseline is **26** (workable from 20 for iteration up to 35–50 for finer detail). |
-| `cfg` | number | no | 0.0 ≤ cfg ≤ 30.0. Default 7.0. **Honored on `chroma1`** (recommend 3.5; workable 3.5–7), **`qwen-image-2512`** (recommend 4.0), and **`openflux1`** (recommend ≈3.5). **Ignored** on `flux1-dev`, `flux2-klein`, and `fluxed-up` (all guidance-distilled). |
+| `steps` | integer | no | 1 ≤ steps ≤ 200. Default 20. Both Flux profiles work well at 20; `chroma1`'s recommended baseline is **26** (workable from 20 for iteration up to 35–50 for finer detail); `qwen-rapid-aio` is a 4-step distill — send **steps=4** (4–8 works). |
+| `cfg` | number | no | 0.0 ≤ cfg ≤ 30.0. Default 7.0. **Honored on `chroma1`** (recommend 3.5; workable 3.5–7), **`qwen-image-2512`** (recommend 4.0), and **`openflux1`** (recommend ≈3.5). **Ignored** on `flux1-dev`, `flux2-klein`, `fluxed-up`, and `qwen-rapid-aio` (all guidance-distilled). |
 
 ### Example
 

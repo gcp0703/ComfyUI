@@ -1,6 +1,6 @@
 """ComfyUI workflow builders.
 
-Six profiles are supported, selected at startup via `COMFY_PROFILE`:
+Seven profiles are supported, selected at startup via `COMFY_PROFILE`:
 
 - ``flux1-dev`` — the classic Flux 1 dev pipeline (UNETLoader + DualCLIPLoader
   with clip_l + T5-XXL + the Flux 1 VAE), shaped to match the official
@@ -26,6 +26,12 @@ Six profiles are supported, selected at startup via `COMFY_PROFILE`:
   loads the OpenFLUX UNet in fp8 mode and drives KSampler with real ``req.cfg``
   + a real second ``CLIPTextEncode`` for ``req.negative_prompt`` instead of
   ``ConditioningZeroOut``.
+- ``qwen-rapid-aio`` — Phr00t/Qwen-Image-Edit-Rapid-AIO, an all-in-one merged
+  checkpoint (UNet + CLIP + VAE in one file) loaded with
+  ``CheckpointLoaderSimple`` + ``TextEncodeQwenImageEditPlus`` (no images = pure
+  text-to-image). A 4-step distilled accelerator merge: cfg=1 +
+  ``ConditioningZeroOut`` with ``euler_ancestral``/``beta``. Like flux1-dev,
+  ``req.cfg`` and ``req.negative_prompt`` are no-ops.
 
 A single ``build_workflow(req, cfg)`` dispatcher picks the right builder.
 """
@@ -39,6 +45,7 @@ from .config import (
     PROFILE_FLUXED_UP,
     PROFILE_OPENFLUX1,
     PROFILE_QWEN_IMAGE_2512,
+    PROFILE_QWEN_RAPID_AIO,
 )
 from .messages import ImageRequest, sanitize_name
 
@@ -51,6 +58,7 @@ CHROMA1_SAVE_NODE_ID = "14"
 FLUXED_UP_SAVE_NODE_ID = "9"
 QWEN_IMAGE_SAVE_NODE_ID = "10"
 OPENFLUX1_SAVE_NODE_ID = "9"
+QWEN_RAPID_SAVE_NODE_ID = "7"
 
 
 # Chroma sampling defaults baked into the workflow — these are not user-tunable
@@ -67,6 +75,13 @@ QWEN_IMAGE_SCHEDULER = "simple"
 QWEN_IMAGE_SHIFT = 3.1
 
 
+# Qwen-Image-Edit Rapid AIO sampling defaults (Phr00t model card, v23):
+# 4-step distilled accelerator merge — run at cfg=1 with euler_ancestral/beta.
+# These are baked in, not user-tunable, because they're tied to the merge.
+QWEN_RAPID_SAMPLER = "euler_ancestral"
+QWEN_RAPID_SCHEDULER = "beta"
+
+
 def build_workflow(req: ImageRequest, cfg: Config) -> dict:
     if cfg.profile == PROFILE_FLUX1_DEV:
         return build_flux1_dev_workflow(req, cfg)
@@ -80,6 +95,8 @@ def build_workflow(req: ImageRequest, cfg: Config) -> dict:
         return build_qwen_image_2512_workflow(req, cfg)
     if cfg.profile == PROFILE_OPENFLUX1:
         return build_openflux1_workflow(req, cfg)
+    if cfg.profile == PROFILE_QWEN_RAPID_AIO:
+        return build_qwen_rapid_aio_workflow(req, cfg)
     raise ValueError(f"unknown profile {cfg.profile!r}")  # pragma: no cover
 
 
@@ -544,5 +561,72 @@ def build_openflux1_workflow(req: ImageRequest, cfg: Config) -> dict:
         OPENFLUX1_SAVE_NODE_ID: {
             "class_type": "SaveImage",
             "inputs": {"filename_prefix": filename_prefix, "images": ["8", 0]},
+        },
+    }
+
+
+def build_qwen_rapid_aio_workflow(req: ImageRequest, cfg: Config) -> dict:
+    """Phr00t/Qwen-Image-Edit-Rapid-AIO — all-in-one checkpoint, pure text-to-image.
+
+    Unlike every other profile, this is a single merged checkpoint (UNet + CLIP +
+    VAE in one file), so it loads with ``CheckpointLoaderSimple`` rather than the
+    separate UNETLoader/CLIPLoader/VAELoader chain. The prompt is encoded by
+    ``TextEncodeQwenImageEditPlus`` with no input images — per the model card,
+    "provide no images to just do pure text to image."
+
+    It is a 4-step distilled accelerator merge driven at ``cfg=1`` with
+    ``euler_ancestral``/``beta`` (the v23 recommendation). Like ``flux1-dev`` and
+    ``fluxed-up`` it is guidance-distilled, so ``req.cfg`` and ``req.negative_prompt``
+    are no-ops — the negative branch is a ``ConditioningZeroOut`` placeholder.
+    Recommended ``req.steps`` is 4 (4-8 works).
+
+    The ``NSFW-v23`` build merges the NSFW LoRAs directly into the weights, so no
+    trigger keyword is required; the SFW build is the same graph with a different
+    checkpoint file.
+    """
+    filename_prefix = sanitize_name(req.name)
+    return {
+        "1": {
+            "class_type": "CheckpointLoaderSimple",
+            "inputs": {"ckpt_name": cfg.qwen_rapid_checkpoint},
+        },
+        "2": {
+            "class_type": "TextEncodeQwenImageEditPlus",
+            "inputs": {"clip": ["1", 1], "prompt": req.prompt},
+        },
+        "3": {
+            "class_type": "ConditioningZeroOut",
+            "inputs": {"conditioning": ["2", 0]},
+        },
+        "4": {
+            "class_type": "EmptySD3LatentImage",
+            "inputs": {
+                "width": req.width,
+                "height": req.height,
+                "batch_size": 1,
+            },
+        },
+        "5": {
+            "class_type": "KSampler",
+            "inputs": {
+                "seed": req.seed,
+                "steps": req.steps,
+                "cfg": 1,
+                "sampler_name": QWEN_RAPID_SAMPLER,
+                "scheduler": QWEN_RAPID_SCHEDULER,
+                "denoise": 1,
+                "model": ["1", 0],
+                "positive": ["2", 0],
+                "negative": ["3", 0],
+                "latent_image": ["4", 0],
+            },
+        },
+        "6": {
+            "class_type": "VAEDecode",
+            "inputs": {"samples": ["5", 0], "vae": ["1", 2]},
+        },
+        QWEN_RAPID_SAVE_NODE_ID: {
+            "class_type": "SaveImage",
+            "inputs": {"filename_prefix": filename_prefix, "images": ["6", 0]},
         },
     }

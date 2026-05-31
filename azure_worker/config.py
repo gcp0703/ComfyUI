@@ -11,6 +11,7 @@ PROFILE_CHROMA1 = "chroma1"
 PROFILE_FLUXED_UP = "fluxed-up"
 PROFILE_QWEN_IMAGE_2512 = "qwen-image-2512"
 PROFILE_OPENFLUX1 = "openflux1"
+PROFILE_QWEN_RAPID_AIO = "qwen-rapid-aio"
 KNOWN_PROFILES = (
     PROFILE_FLUX1_DEV,
     PROFILE_FLUX2_KLEIN,
@@ -18,6 +19,7 @@ KNOWN_PROFILES = (
     PROFILE_FLUXED_UP,
     PROFILE_QWEN_IMAGE_2512,
     PROFILE_OPENFLUX1,
+    PROFILE_QWEN_RAPID_AIO,
 )
 
 
@@ -53,6 +55,9 @@ class Config:
     qwen_vae: str
     # OpenFLUX.1 profile (de-distilled Flux 1 schnell — same arch, real CFG; reuses flux1 CLIP-L/T5/VAE)
     openflux_unet: str
+    # Qwen-Image-Edit Rapid AIO profile (Phr00t — all-in-one checkpoint: UNet+CLIP+VAE
+    # merged into one file, loaded with CheckpointLoaderSimple. 4-step distilled, cfg=1.)
+    qwen_rapid_checkpoint: str
     # LLM-side queues + Ollama HTTP endpoint (separate workload, polled with
     # priority over the image queue in the main loop). Uses Ollama's native
     # /api/chat (not OpenAI-compat) so the `think` toggle works on Qwen3.
@@ -121,6 +126,7 @@ def load_config() -> Config:
         qwen_clip=_require("COMFY_QWEN_CLIP"),
         qwen_vae=_require("COMFY_QWEN_VAE"),
         openflux_unet=_require("COMFY_OPENFLUX_UNET"),
+        qwen_rapid_checkpoint=_require("COMFY_QWEN_RAPID_CHECKPOINT"),
         llm_inbound_queue=_require("LLM_INBOUND_QUEUE"),
         llm_outbound_queue=_require("LLM_OUTBOUND_QUEUE"),
         ollama_url=_require("OLLAMA_URL"),

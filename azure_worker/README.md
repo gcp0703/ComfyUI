@@ -12,7 +12,7 @@ A small worker that consumes two kinds of requests off Azure Storage Queues:
 The LLM queue is polled **first every iteration**; image jobs only run when
 the LLM queue is empty.
 
-Six model profiles are supported and selected at startup via `COMFY_PROFILE`:
+Seven model profiles are supported and selected at startup via `COMFY_PROFILE`:
 
 | Profile | Models | Notes |
 |---|---|---|
@@ -22,8 +22,9 @@ Six model profiles are supported and selected at startup via `COMFY_PROFILE`:
 | `fluxed-up` | `fluxedUpFluxNSFW_40DevFp8.safetensors` (fp8) + reuses flux1 DualCLIP + Flux 1 VAE | NSFW Flux 1 dev finetune. Same guidance-distilled driving as `flux1-dev` — `cfg` and `negative_prompt` are no-ops. |
 | `qwen-image-2512` | `qwen_image_2512_fp8_e4m3fn.safetensors` + CLIPLoader(type=qwen_image) with Qwen 2.5 VL 7B + `qwen_image_vae.safetensors` | Alibaba Qwen-Image (Dec 2025). **`cfg` and `negative_prompt` are honored.** Euler + simple, sigma shift 3.1. Recommended: steps=20-50, cfg=4.0. |
 | `openflux1` | `openflux1-v0.1.0-fp8.safetensors` (fp8) + reuses flux1 DualCLIP + Flux 1 VAE | ostris/OpenFLUX.1 — de-distilled Flux 1 schnell. Same Flux 1 architecture. **`cfg` and `negative_prompt` are honored.** Recommended: cfg≈3.5, steps≥20. |
+| `qwen-rapid-aio` | `Qwen-Rapid-AIO-NSFW-v23.safetensors` — **all-in-one** checkpoint (UNet+CLIP+VAE merged), loaded with `CheckpointLoaderSimple` + `TextEncodeQwenImageEditPlus` | Phr00t/Qwen-Image-Edit-Rapid-AIO. 4-step distilled accelerator merge — `cfg=1` + `euler_ancestral`/`beta` baked in, so **`cfg` and `negative_prompt` are no-ops**. NSFW LoRAs merged in (no trigger word). Recommended: steps=4 (4-8). |
 
-All six profile blocks must be filled in `.env`; only the active profile is
+All seven profile blocks must be filled in `.env`; only the active profile is
 actually loaded into VRAM. Switching profiles requires restarting the worker.
 
 The worker uses ComfyUI's production execution path — it boots a
