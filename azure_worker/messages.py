@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Optional
 
 
-MAX_PROMPT_CHARS = 4000
+MAX_PROMPT_CHARS = 4096
 MIN_DIM = 64
 MAX_DIM = 4096
 # Flux 2's EmptyFlux2LatentImage requires width/height in 16-pixel increments
