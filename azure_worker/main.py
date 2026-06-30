@@ -55,6 +55,9 @@ def _process_one_llm(llm: LlmRunner, clients: azure_io.AzureClients) -> bool:
             "llm job %s model=%s thinking=%s temp=%.2f max_tokens=%d",
             req.job_id, req.model, req.thinking, req.temperature, req.max_tokens,
         )
+        if req.system_prompt:
+            log.info("llm job %s system_prompt: %s", req.job_id, req.system_prompt)
+        log.info("llm job %s user_prompt: %s", req.job_id, req.user_prompt)
         completion = llm.run(req)
         result = LlmResult.success(
             req,
@@ -95,6 +98,9 @@ def _process_one(runner: ComfyRunner, clients: azure_io.AzureClients) -> bool:
     try:
         req = ImageRequest.from_json(raw_body)
         log.info("job %s name=%s %dx%d", req.job_id, req.name, req.width, req.height)
+        log.info("job %s prompt: %s", req.job_id, req.prompt)
+        if req.negative_prompt:
+            log.info("job %s negative_prompt: %s", req.job_id, req.negative_prompt)
         workflow = build_workflow(req, clients.config)
         outputs = runner.run(workflow, prompt_id=req.job_id)
         if not outputs:
