@@ -12,8 +12,9 @@ import signal
 import sys
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
+from azure.core.exceptions import ServiceRequestError, ServiceResponseError
 from dotenv import load_dotenv
 
 from . import azure_io
@@ -126,6 +127,42 @@ def _process_one(runner: ComfyRunner, clients: azure_io.AzureClients) -> bool:
     return True
 
 
+# Transport-level errors raised before any HTTP response is parsed: DNS failures
+# (getaddrinfo failed), connection resets, read timeouts. These are transient — a
+# laptop sleep, VPN reconnect, or brief network blip — and must NOT take down a
+# long-running poll worker. Genuine HttpResponseError subclasses (auth/config
+# failures like a bad account key) are deliberately *not* caught: those should
+# crash loudly rather than spin in a silent retry loop.
+_TRANSIENT_POLL_ERRORS = (ServiceRequestError, ServiceResponseError)
+
+
+def _run_loop(
+    llm_runner: LlmRunner,
+    runner: ComfyRunner,
+    clients: azure_io.AzureClients,
+    poll_interval: float,
+    should_stop: Callable[[], bool] = lambda: _shutdown,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    """Poll both queues until `should_stop()`, surviving transient network errors.
+
+    LLM-first priority: drain the LLM queue before touching the image queue.
+    A flood of LLM requests will starve image jobs, which is the intended
+    ordering — image jobs are minutes long, LLM jobs are seconds.
+    """
+    while not should_stop():
+        try:
+            if _process_one_llm(llm_runner, clients):
+                continue
+            if _process_one(runner, clients):
+                continue
+        except _TRANSIENT_POLL_ERRORS as e:
+            # Log and fall through to the backoff sleep; the queue endpoint will
+            # resolve again once connectivity returns.
+            log.warning("transient Azure error during poll, backing off %.1fs: %s", poll_interval, e)
+        sleep(poll_interval)
+
+
 def main() -> int:
     logging.basicConfig(
         level=logging.INFO,
@@ -150,15 +187,7 @@ def main() -> int:
         "polling llm-queue %r (priority) then image-queue %r every %.1fs",
         cfg.llm_inbound_queue, cfg.inbound_queue, cfg.poll_interval_seconds,
     )
-    while not _shutdown:
-        # LLM-first priority: drain the LLM queue before touching the image queue.
-        # A flood of LLM requests will starve image jobs, which is the intended
-        # ordering — image jobs are minutes long, LLM jobs are seconds.
-        if _process_one_llm(llm_runner, clients):
-            continue
-        if _process_one(runner, clients):
-            continue
-        time.sleep(cfg.poll_interval_seconds)
+    _run_loop(llm_runner, runner, clients, cfg.poll_interval_seconds)
 
     log.info("shutdown complete")
     runner.close()
