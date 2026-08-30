@@ -12,6 +12,7 @@ PROFILE_FLUXED_UP = "fluxed-up"
 PROFILE_QWEN_IMAGE_2512 = "qwen-image-2512"
 PROFILE_OPENFLUX1 = "openflux1"
 PROFILE_QWEN_RAPID_AIO = "qwen-rapid-aio"
+PROFILE_SDXL_DREAMSHAPER = "sdxl-dreamshaper"
 KNOWN_PROFILES = (
     PROFILE_FLUX1_DEV,
     PROFILE_FLUX2_KLEIN,
@@ -20,11 +21,28 @@ KNOWN_PROFILES = (
     PROFILE_QWEN_IMAGE_2512,
     PROFILE_OPENFLUX1,
     PROFILE_QWEN_RAPID_AIO,
+    PROFILE_SDXL_DREAMSHAPER,
 )
 
 
 class ConfigError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class LoraSpec:
+    """One entry in a profile's LoRA stack.
+
+    ``name`` is a path relative to ``models/loras`` using the *native* separator
+    — the same string ComfyUI's ``LoraLoader`` validates against, since
+    ``folder_paths.recursive_search`` builds its filename list with
+    ``os.path.relpath`` (backslashes on Windows). Configuration is written with
+    forward slashes and normalized by :func:`_optional_loras`.
+    """
+
+    name: str
+    model_strength: float = 1.0
+    clip_strength: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -58,6 +76,11 @@ class Config:
     # Qwen-Image-Edit Rapid AIO profile (Phr00t — all-in-one checkpoint: UNet+CLIP+VAE
     # merged into one file, loaded with CheckpointLoaderSimple. 4-step distilled, cfg=1.)
     qwen_rapid_checkpoint: str
+    # SDXL DreamShaper XL profile (Lykon DreamShaper XL Turbo v2.1 — plain SDXL
+    # 1.0 architecture in a single checkpoint with baked CLIP + VAE, plus an
+    # ordered stack of fantasy-race LoRAs chained onto it.)
+    sdxl_checkpoint: str
+    sdxl_loras: tuple[LoraSpec, ...]
     # LLM-side queues + Ollama HTTP endpoint (separate workload, polled with
     # priority over the image queue in the main loop). Uses Ollama's native
     # /api/chat (not OpenAI-compat) so the `think` toggle works on Qwen3.
@@ -98,6 +121,47 @@ def _optional_float(name: str, default: float) -> float:
         raise ConfigError(f"environment variable {name}={raw!r} is not a number") from e
 
 
+def _optional_loras(name: str) -> tuple[LoraSpec, ...]:
+    """Parse a comma-separated LoRA stack from one environment variable.
+
+    Each entry is ``file[:model_strength[:clip_strength]]``; omitted strengths
+    default to 1.0, and a lone model strength is reused for the CLIP strength
+    (the usual case). An unset or empty variable means "no LoRAs".
+
+        COMFY_SDXL_LORAS=dnd/RPGElfXL.safetensors:0.8,dnd/Elf_Ears_XL.safetensors:0.6:0.4
+
+    Subfolder separators are written as ``/`` and rewritten to ``os.sep`` so the
+    name matches ComfyUI's filename list on Windows as well as POSIX.
+    """
+    raw = os.environ.get(name) or ""
+    specs: list[LoraSpec] = []
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        parts = [p.strip() for p in entry.split(":")]
+        if len(parts) > 3:
+            raise ConfigError(
+                f"environment variable {name} entry {entry!r} has too many ':' fields; "
+                "expected file[:model_strength[:clip_strength]]"
+            )
+        lora_name = parts[0].replace("/", os.sep)
+        if not lora_name:
+            raise ConfigError(f"environment variable {name} entry {entry!r} has an empty filename")
+        strengths: list[float] = []
+        for field, part in zip(("model_strength", "clip_strength"), parts[1:]):
+            try:
+                strengths.append(float(part))
+            except ValueError as e:
+                raise ConfigError(
+                    f"environment variable {name} entry {entry!r} has a non-numeric {field}: {part!r}"
+                ) from e
+        model_strength = strengths[0] if strengths else 1.0
+        clip_strength = strengths[1] if len(strengths) > 1 else model_strength
+        specs.append(LoraSpec(lora_name, model_strength, clip_strength))
+    return tuple(specs)
+
+
 def load_config() -> Config:
     profile = _require("COMFY_PROFILE")
     if profile not in KNOWN_PROFILES:
@@ -127,6 +191,8 @@ def load_config() -> Config:
         qwen_vae=_require("COMFY_QWEN_VAE"),
         openflux_unet=_require("COMFY_OPENFLUX_UNET"),
         qwen_rapid_checkpoint=_require("COMFY_QWEN_RAPID_CHECKPOINT"),
+        sdxl_checkpoint=_require("COMFY_SDXL_CHECKPOINT"),
+        sdxl_loras=_optional_loras("COMFY_SDXL_LORAS"),
         llm_inbound_queue=_require("LLM_INBOUND_QUEUE"),
         llm_outbound_queue=_require("LLM_OUTBOUND_QUEUE"),
         ollama_url=_require("OLLAMA_URL"),

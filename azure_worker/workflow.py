@@ -1,6 +1,6 @@
 """ComfyUI workflow builders.
 
-Seven profiles are supported, selected at startup via `COMFY_PROFILE`:
+Eight profiles are supported, selected at startup via `COMFY_PROFILE`:
 
 - ``flux1-dev`` — the classic Flux 1 dev pipeline (UNETLoader + DualCLIPLoader
   with clip_l + T5-XXL + the Flux 1 VAE), shaped to match the official
@@ -32,6 +32,15 @@ Seven profiles are supported, selected at startup via `COMFY_PROFILE`:
   text-to-image). A 4-step distilled accelerator merge: cfg=1 +
   ``ConditioningZeroOut`` with ``euler_ancestral``/``beta``. Like flux1-dev,
   ``req.cfg`` and ``req.negative_prompt`` are no-ops.
+- ``sdxl-dreamshaper`` — Lykon DreamShaper XL Turbo v2.1, a plain SDXL 1.0
+  checkpoint (CLIP-G/CLIP-L + VAE baked in) loaded with
+  ``CheckpointLoaderSimple``, then an ordered stack of ``LoraLoader`` nodes
+  built from ``cfg.sdxl_loras`` (the D&D fantasy-race LoRAs). Uses real
+  ``CLIPTextEncode`` for both branches, so ``req.negative_prompt`` is honored,
+  and ``EmptyLatentImage`` (SDXL's 4-channel latent, not ``EmptySD3LatentImage``).
+  Sampling is ``dpmpp_sde``/``karras`` at a baked ``cfg=2`` per the Turbo v2.1
+  model card, so ``req.cfg`` is a no-op; ``req.steps`` is honored (4-8 is the
+  recommended range).
 
 A single ``build_workflow(req, cfg)`` dispatcher picks the right builder.
 """
@@ -46,6 +55,7 @@ from .config import (
     PROFILE_OPENFLUX1,
     PROFILE_QWEN_IMAGE_2512,
     PROFILE_QWEN_RAPID_AIO,
+    PROFILE_SDXL_DREAMSHAPER,
 )
 from .messages import ImageRequest, sanitize_name
 
@@ -59,6 +69,7 @@ FLUXED_UP_SAVE_NODE_ID = "9"
 QWEN_IMAGE_SAVE_NODE_ID = "10"
 OPENFLUX1_SAVE_NODE_ID = "9"
 QWEN_RAPID_SAVE_NODE_ID = "7"
+SDXL_SAVE_NODE_ID = "9"
 
 
 # Chroma sampling defaults baked into the workflow — these are not user-tunable
@@ -82,6 +93,21 @@ QWEN_RAPID_SAMPLER = "euler_ancestral"
 QWEN_RAPID_SCHEDULER = "beta"
 
 
+# DreamShaper XL Turbo v2.1 sampling defaults (Lykon's model card): DPM++ SDE
+# Karras at cfg=2 with 4-8 steps. cfg is baked rather than taken from
+# ``req.cfg`` because this is a turbo/accelerator merge — the ImageRequest
+# default of 7.0 would blow the output out. Unlike the guidance-distilled Flux
+# profiles, a real negative prompt still works at this cfg, so the negative
+# branch is a genuine CLIPTextEncode rather than ConditioningZeroOut.
+SDXL_SAMPLER = "dpmpp_sde"
+SDXL_SCHEDULER = "karras"
+SDXL_CFG = 2.0
+
+# First node id for the generated LoRA chain. Kept clear of the fixed core
+# node ids ("1".."6", "9") so the stack can grow without colliding.
+SDXL_LORA_NODE_BASE = 20
+
+
 def build_workflow(req: ImageRequest, cfg: Config) -> dict:
     if cfg.profile == PROFILE_FLUX1_DEV:
         return build_flux1_dev_workflow(req, cfg)
@@ -97,6 +123,8 @@ def build_workflow(req: ImageRequest, cfg: Config) -> dict:
         return build_openflux1_workflow(req, cfg)
     if cfg.profile == PROFILE_QWEN_RAPID_AIO:
         return build_qwen_rapid_aio_workflow(req, cfg)
+    if cfg.profile == PROFILE_SDXL_DREAMSHAPER:
+        return build_sdxl_dreamshaper_workflow(req, cfg)
     raise ValueError(f"unknown profile {cfg.profile!r}")  # pragma: no cover
 
 
@@ -630,3 +658,88 @@ def build_qwen_rapid_aio_workflow(req: ImageRequest, cfg: Config) -> dict:
             "inputs": {"filename_prefix": filename_prefix, "images": ["6", 0]},
         },
     }
+
+
+def build_sdxl_dreamshaper_workflow(req: ImageRequest, cfg: Config) -> dict:
+    """Lykon/DreamShaper XL Turbo v2.1 with a chained stack of fantasy-race LoRAs.
+
+    Plain SDXL 1.0: one ``CheckpointLoaderSimple`` supplies model, CLIP and VAE.
+    Every ``LoraSpec`` in ``cfg.sdxl_loras`` becomes a ``LoraLoader`` node wired
+    in order, each taking the previous node's model+CLIP, so the D&D race LoRAs
+    stack the way they would in the ComfyUI graph. With an empty stack the
+    checkpoint feeds the text encoders directly.
+
+    Sampling follows the Turbo v2.1 model card (``dpmpp_sde``/``karras``,
+    ``cfg=2``); see ``SDXL_CFG`` for why ``req.cfg`` is not used. Both prompt
+    branches are real ``CLIPTextEncode`` nodes, so ``req.negative_prompt``
+    takes effect.
+    """
+    filename_prefix = sanitize_name(req.name)
+    workflow: dict = {
+        "1": {
+            "class_type": "CheckpointLoaderSimple",
+            "inputs": {"ckpt_name": cfg.sdxl_checkpoint},
+        },
+    }
+
+    # Chain the LoRA stack off the checkpoint; `source` tracks whatever node
+    # currently provides model (output 0) and CLIP (output 1).
+    source = "1"
+    for offset, lora in enumerate(cfg.sdxl_loras):
+        node_id = str(SDXL_LORA_NODE_BASE + offset)
+        workflow[node_id] = {
+            "class_type": "LoraLoader",
+            "inputs": {
+                "lora_name": lora.name,
+                "strength_model": lora.model_strength,
+                "strength_clip": lora.clip_strength,
+                "model": [source, 0],
+                "clip": [source, 1],
+            },
+        }
+        source = node_id
+
+    workflow.update(
+        {
+            "2": {
+                "class_type": "CLIPTextEncode",
+                "inputs": {"clip": [source, 1], "text": req.prompt},
+            },
+            "3": {
+                "class_type": "CLIPTextEncode",
+                "inputs": {"clip": [source, 1], "text": req.negative_prompt},
+            },
+            "4": {
+                "class_type": "EmptyLatentImage",
+                "inputs": {
+                    "width": req.width,
+                    "height": req.height,
+                    "batch_size": 1,
+                },
+            },
+            "5": {
+                "class_type": "KSampler",
+                "inputs": {
+                    "seed": req.seed,
+                    "steps": req.steps,
+                    "cfg": SDXL_CFG,
+                    "sampler_name": SDXL_SAMPLER,
+                    "scheduler": SDXL_SCHEDULER,
+                    "denoise": 1,
+                    "model": [source, 0],
+                    "positive": ["2", 0],
+                    "negative": ["3", 0],
+                    "latent_image": ["4", 0],
+                },
+            },
+            "6": {
+                "class_type": "VAEDecode",
+                "inputs": {"samples": ["5", 0], "vae": ["1", 2]},
+            },
+            SDXL_SAVE_NODE_ID: {
+                "class_type": "SaveImage",
+                "inputs": {"filename_prefix": filename_prefix, "images": ["6", 0]},
+            },
+        }
+    )
+    return workflow

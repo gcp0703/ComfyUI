@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -13,7 +14,11 @@ from azure_worker.config import (
     PROFILE_OPENFLUX1,
     PROFILE_QWEN_IMAGE_2512,
     PROFILE_QWEN_RAPID_AIO,
+    PROFILE_SDXL_DREAMSHAPER,
     Config,
+    ConfigError,
+    LoraSpec,
+    _optional_loras,
 )
 from azure_worker.messages import (
     ImageRequest,
@@ -29,6 +34,11 @@ from azure_worker.workflow import (
     OPENFLUX1_SAVE_NODE_ID,
     QWEN_IMAGE_SAVE_NODE_ID,
     QWEN_RAPID_SAVE_NODE_ID,
+    SDXL_CFG,
+    SDXL_LORA_NODE_BASE,
+    SDXL_SAMPLER,
+    SDXL_SAVE_NODE_ID,
+    SDXL_SCHEDULER,
     build_chroma1_workflow,
     build_flux1_dev_workflow,
     build_flux2_klein_workflow,
@@ -36,11 +46,12 @@ from azure_worker.workflow import (
     build_openflux1_workflow,
     build_qwen_image_2512_workflow,
     build_qwen_rapid_aio_workflow,
+    build_sdxl_dreamshaper_workflow,
     build_workflow,
 )
 
 
-def _cfg(profile: str) -> Config:
+def _cfg(profile: str, sdxl_loras: tuple = ()) -> Config:
     return Config(
         storage_connection_string="x",
         inbound_queue="i",
@@ -63,6 +74,8 @@ def _cfg(profile: str) -> Config:
         qwen_vae="qwen_image_vae.safetensors",
         openflux_unet="openflux1-v0.1.0-fp8.safetensors",
         qwen_rapid_checkpoint="Qwen-Rapid-AIO-NSFW-v23.safetensors",
+        sdxl_checkpoint="DreamShaperXL_Turbo_v2_1.safetensors",
+        sdxl_loras=sdxl_loras,
         llm_inbound_queue="llm-requests",
         llm_outbound_queue="llm-results",
         ollama_url="http://localhost:11434",
@@ -451,3 +464,140 @@ def test_result_error_when_request_was_invalid():
 def test_sanitize_name_strips_unsafe_chars():
     assert sanitize_name("../weird name!.png") == "weird_name_.png"
     assert sanitize_name("") == "image"
+
+
+# --- sdxl-dreamshaper -------------------------------------------------------
+
+
+_ELF = LoraSpec("dnd/RPGElfXL.safetensors", 0.8, 0.8)
+_EARS = LoraSpec("dnd/Elf_Ears_XL.safetensors", 0.6, 0.4)
+
+
+def test_sdxl_dreamshaper_workflow_shape_without_loras():
+    req = ImageRequest.from_json(_sample_payload(steps=6, negative_prompt="blurry"))
+    wf = build_sdxl_dreamshaper_workflow(req, _cfg(PROFILE_SDXL_DREAMSHAPER))
+
+    assert wf["1"]["class_type"] == "CheckpointLoaderSimple"
+    assert wf["1"]["inputs"]["ckpt_name"] == "DreamShaperXL_Turbo_v2_1.safetensors"
+
+    # No LoRAs configured -> no LoraLoader nodes, encoders read the checkpoint.
+    assert not [n for n in wf.values() if n["class_type"] == "LoraLoader"]
+    assert wf["2"]["inputs"]["clip"] == ["1", 1]
+    assert wf["3"]["inputs"]["clip"] == ["1", 1]
+    assert wf["5"]["inputs"]["model"] == ["1", 0]
+
+    # Real negative prompt, unlike the guidance-distilled profiles.
+    assert wf["2"]["class_type"] == "CLIPTextEncode"
+    assert wf["2"]["inputs"]["text"] == "a cat"
+    assert wf["3"]["class_type"] == "CLIPTextEncode"
+    assert wf["3"]["inputs"]["text"] == "blurry"
+
+    # SDXL uses the 4-channel latent, not EmptySD3LatentImage.
+    assert wf["4"]["class_type"] == "EmptyLatentImage"
+    assert wf["4"]["inputs"]["width"] == 1024
+    assert wf["4"]["inputs"]["height"] == 1024
+
+    sampler = wf["5"]["inputs"]
+    assert wf["5"]["class_type"] == "KSampler"
+    assert sampler["sampler_name"] == SDXL_SAMPLER == "dpmpp_sde"
+    assert sampler["scheduler"] == SDXL_SCHEDULER == "karras"
+    assert sampler["cfg"] == SDXL_CFG == 2.0
+    assert sampler["steps"] == 6
+    assert sampler["seed"] == 7
+
+    assert wf["6"]["inputs"]["vae"] == ["1", 2]
+    assert wf[SDXL_SAVE_NODE_ID]["class_type"] == "SaveImage"
+    assert wf[SDXL_SAVE_NODE_ID]["inputs"]["filename_prefix"] == "test-image"
+
+
+def test_sdxl_dreamshaper_chains_lora_stack_in_order():
+    req = ImageRequest.from_json(_sample_payload())
+    wf = build_sdxl_dreamshaper_workflow(
+        req, _cfg(PROFILE_SDXL_DREAMSHAPER, sdxl_loras=(_ELF, _EARS))
+    )
+
+    first, second = str(SDXL_LORA_NODE_BASE), str(SDXL_LORA_NODE_BASE + 1)
+    assert wf[first]["class_type"] == "LoraLoader"
+    assert wf[first]["inputs"]["lora_name"] == "dnd/RPGElfXL.safetensors"
+    assert wf[first]["inputs"]["strength_model"] == 0.8
+    assert wf[first]["inputs"]["strength_clip"] == 0.8
+    # First LoRA hangs off the checkpoint...
+    assert wf[first]["inputs"]["model"] == ["1", 0]
+    assert wf[first]["inputs"]["clip"] == ["1", 1]
+
+    # ...and each subsequent one off the previous LoRA.
+    assert wf[second]["inputs"]["lora_name"] == "dnd/Elf_Ears_XL.safetensors"
+    assert wf[second]["inputs"]["strength_model"] == 0.6
+    assert wf[second]["inputs"]["strength_clip"] == 0.4
+    assert wf[second]["inputs"]["model"] == [first, 0]
+    assert wf[second]["inputs"]["clip"] == [first, 1]
+
+    # Tail of the chain drives both encoders and the sampler; VAE stays on the
+    # checkpoint because LoraLoader has no VAE output.
+    assert wf["2"]["inputs"]["clip"] == [second, 1]
+    assert wf["3"]["inputs"]["clip"] == [second, 1]
+    assert wf["5"]["inputs"]["model"] == [second, 0]
+    assert wf["6"]["inputs"]["vae"] == ["1", 2]
+
+
+def test_sdxl_dreamshaper_lora_nodes_do_not_collide_with_core_nodes():
+    req = ImageRequest.from_json(_sample_payload())
+    stack = tuple(LoraSpec(f"dnd/r{i}.safetensors") for i in range(12))
+    wf = build_sdxl_dreamshaper_workflow(req, _cfg(PROFILE_SDXL_DREAMSHAPER, sdxl_loras=stack))
+
+    assert len([n for n in wf.values() if n["class_type"] == "LoraLoader"]) == 12
+    for core in ("1", "2", "3", "4", "5", "6", SDXL_SAVE_NODE_ID):
+        assert wf[core]["class_type"] != "LoraLoader"
+
+
+def test_dispatcher_picks_sdxl_dreamshaper_for_sdxl_dreamshaper_profile():
+    req = ImageRequest.from_json(_sample_payload())
+    wf = build_workflow(req, _cfg(PROFILE_SDXL_DREAMSHAPER, sdxl_loras=(_ELF,)))
+
+    assert wf["1"]["class_type"] == "CheckpointLoaderSimple"
+    assert wf[str(SDXL_LORA_NODE_BASE)]["class_type"] == "LoraLoader"
+    assert wf[SDXL_SAVE_NODE_ID]["class_type"] == "SaveImage"
+
+
+# --- COMFY_SDXL_LORAS parsing ----------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("", ()),
+        ("   ", ()),
+        ("a.safetensors", (LoraSpec("a.safetensors", 1.0, 1.0),)),
+        # A lone strength applies to both model and CLIP.
+        ("a.safetensors:0.7", (LoraSpec("a.safetensors", 0.7, 0.7),)),
+        ("a.safetensors:0.7:0.3", (LoraSpec("a.safetensors", 0.7, 0.3),)),
+        # Subfolders are normalized to the native separator so the name matches
+        # ComfyUI's os.path.relpath-derived filename list (backslashes on Windows).
+        (
+            " dnd/a.safetensors:0.8 , dnd/b.safetensors ",
+            (
+                LoraSpec(os.path.join("dnd", "a.safetensors"), 0.8, 0.8),
+                LoraSpec(os.path.join("dnd", "b.safetensors"), 1.0, 1.0),
+            ),
+        ),
+        # Trailing/duplicate commas are ignored rather than fatal.
+        ("a.safetensors,,", (LoraSpec("a.safetensors", 1.0, 1.0),)),
+    ],
+)
+def test_optional_loras_parsing(monkeypatch, raw, expected):
+    monkeypatch.setenv("COMFY_SDXL_LORAS", raw)
+    assert _optional_loras("COMFY_SDXL_LORAS") == expected
+
+
+def test_optional_loras_unset_is_empty(monkeypatch):
+    monkeypatch.delenv("COMFY_SDXL_LORAS", raising=False)
+    assert _optional_loras("COMFY_SDXL_LORAS") == ()
+
+
+@pytest.mark.parametrize(
+    "raw", ["a.safetensors:notanumber", "a.safetensors:1:2:3", ":0.5"]
+)
+def test_optional_loras_rejects_malformed_entries(monkeypatch, raw):
+    monkeypatch.setenv("COMFY_SDXL_LORAS", raw)
+    with pytest.raises(ConfigError):
+        _optional_loras("COMFY_SDXL_LORAS")
