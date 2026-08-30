@@ -23,7 +23,7 @@ from .config import ConfigError, load_config
 from .llm_messages import LlmMessageValidationError, LlmRequest, LlmResult
 from .llm_runner import LlmJobError, LlmRunner
 from .messages import ImageRequest, ImageResult, MessageValidationError, sanitize_name
-from .workflow import build_workflow
+from .workflow import build_workflow, effective_cfg, summarize_workflow
 
 log = logging.getLogger("azure_worker")
 
@@ -103,6 +103,13 @@ def _process_one(runner: ComfyRunner, clients: azure_io.AzureClients) -> bool:
         if req.negative_prompt:
             log.info("job %s negative_prompt: %s", req.job_id, req.negative_prompt)
         workflow = build_workflow(req, clients.config)
+        settings = summarize_workflow(workflow)
+        # The distilled/turbo profiles bake their own guidance scale, so say so
+        # rather than letting a request's cfg look like it was honored.
+        sampled_cfg = effective_cfg(workflow)
+        if sampled_cfg is not None and abs(sampled_cfg - req.cfg) > 1e-9:
+            settings += f" (req.cfg={req.cfg} ignored by profile {clients.config.profile})"
+        log.info("job %s settings: %s", req.job_id, settings)
         outputs = runner.run(workflow, prompt_id=req.job_id)
         if not outputs:
             raise ComfyJobError("workflow produced no output files")

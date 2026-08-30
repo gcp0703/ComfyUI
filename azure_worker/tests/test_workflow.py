@@ -48,6 +48,8 @@ from azure_worker.workflow import (
     build_qwen_rapid_aio_workflow,
     build_sdxl_dreamshaper_workflow,
     build_workflow,
+    effective_cfg,
+    summarize_workflow,
 )
 
 
@@ -601,3 +603,68 @@ def test_optional_loras_rejects_malformed_entries(monkeypatch, raw):
     monkeypatch.setenv("COMFY_SDXL_LORAS", raw)
     with pytest.raises(ConfigError):
         _optional_loras("COMFY_SDXL_LORAS")
+
+
+# --- log echo: summarize_workflow / effective_cfg ---------------------------
+
+
+def test_summarize_workflow_echoes_models_loras_and_sampler():
+    req = ImageRequest.from_json(_sample_payload(steps=6))
+    wf = build_workflow(req, _cfg(PROFILE_SDXL_DREAMSHAPER, sdxl_loras=(_ELF, _EARS)))
+    line = summarize_workflow(wf)
+
+    assert "model=DreamShaperXL_Turbo_v2_1.safetensors" in line
+    # LoRAs appear in chain order with both strengths.
+    assert "loras=dnd/RPGElfXL.safetensors@0.8/0.8,dnd/Elf_Ears_XL.safetensors@0.6/0.4" in line
+    assert "steps=6" in line
+    assert "cfg=2.0" in line
+    assert "sampler=dpmpp_sde/karras" in line
+
+
+def test_summarize_workflow_says_none_when_no_loras():
+    req = ImageRequest.from_json(_sample_payload())
+    assert "loras=none" in summarize_workflow(build_workflow(req, _cfg(PROFILE_SDXL_DREAMSHAPER)))
+
+
+@pytest.mark.parametrize(
+    "profile,expected_cfg",
+    [
+        (PROFILE_SDXL_DREAMSHAPER, 2.0),
+        (PROFILE_QWEN_RAPID_AIO, 1),
+        (PROFILE_FLUX1_DEV, 1),
+    ],
+)
+def test_effective_cfg_reports_the_baked_value(profile, expected_cfg):
+    # Request asks for 7.0; these profiles all override it.
+    req = ImageRequest.from_json(_sample_payload(cfg=7.0))
+    assert req.cfg == 7.0
+    assert effective_cfg(build_workflow(req, _cfg(profile))) == expected_cfg
+
+
+def test_effective_cfg_reports_honored_value_for_real_cfg_profiles():
+    req = ImageRequest.from_json(_sample_payload(cfg=4.5))
+    assert effective_cfg(build_workflow(req, _cfg(PROFILE_OPENFLUX1))) == 4.5
+
+
+@pytest.mark.parametrize(
+    "profile",
+    [
+        PROFILE_FLUX1_DEV,
+        PROFILE_FLUX2_KLEIN,
+        PROFILE_CHROMA1,
+        PROFILE_FLUXED_UP,
+        PROFILE_QWEN_IMAGE_2512,
+        PROFILE_OPENFLUX1,
+        PROFILE_QWEN_RAPID_AIO,
+        PROFILE_SDXL_DREAMSHAPER,
+    ],
+)
+def test_summarize_workflow_covers_every_profile(profile):
+    """Every profile must produce a usable log line, not just the KSampler ones."""
+    req = ImageRequest.from_json(_sample_payload(steps=6))
+    line = summarize_workflow(build_workflow(req, _cfg(profile)))
+
+    assert "model=" in line
+    assert "loras=" in line
+    assert "steps=6" in line, f"{profile} did not report steps: {line!r}"
+    assert "sampler=" in line, f"{profile} did not report a sampler: {line!r}"

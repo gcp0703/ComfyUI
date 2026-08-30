@@ -108,6 +108,90 @@ SDXL_CFG = 2.0
 SDXL_LORA_NODE_BASE = 20
 
 
+# Node classes that carry the sampler settings worth echoing to the log. The
+# KSampler-driven profiles keep everything on one node; flux2-klein and chroma1
+# split it across the SamplerCustomAdvanced trio instead.
+_KSAMPLER_CLASSES = ("KSampler", "KSamplerAdvanced")
+_STEPS_CLASSES = ("BasicScheduler", "Flux2Scheduler")
+
+
+def effective_cfg(workflow: dict) -> float | None:
+    """The guidance scale a built graph will actually sample at, if it states one.
+
+    Not the same as ``req.cfg``: the distilled and turbo profiles bake their own
+    value and ignore the request's.
+    """
+    for node in workflow.values():
+        inputs = node.get("inputs", {})
+        if "cfg" not in inputs:
+            continue
+        if node.get("class_type") in _KSAMPLER_CLASSES + ("CFGGuider",):
+            return float(inputs["cfg"])
+    return None
+
+
+def summarize_workflow(workflow: dict) -> str:
+    """One-line digest of the models and sampler settings in a built graph.
+
+    Read back out of the graph rather than off ``Config`` so the logged line
+    cannot drift from what actually executes, and so every profile reports
+    through the same code path regardless of how its sampler is wired.
+    """
+    parts: list[str] = []
+
+    models = [
+        name
+        for node in workflow.values()
+        for key in ("ckpt_name", "unet_name")
+        if (name := node.get("inputs", {}).get(key))
+    ]
+    if models:
+        parts.append("model=" + ",".join(models))
+
+    lora_ids = sorted(
+        (nid for nid, node in workflow.items() if node.get("class_type") == "LoraLoader"),
+        key=lambda nid: int(nid) if nid.isdigit() else nid,
+    )
+    loras = [
+        "{lora_name}@{strength_model}/{strength_clip}".format(**workflow[nid]["inputs"])
+        for nid in lora_ids
+    ]
+    parts.append("loras=" + (",".join(loras) if loras else "none"))
+
+    for node in workflow.values():
+        if node.get("class_type") in _KSAMPLER_CLASSES:
+            i = node["inputs"]
+            parts.append(
+                f"steps={i.get('steps')} cfg={i.get('cfg')} "
+                f"sampler={i.get('sampler_name')}/{i.get('scheduler')}"
+            )
+            break
+    else:
+        # SamplerCustomAdvanced profiles: steps, cfg and sampler live on
+        # separate nodes. Collect them by field, then emit in the same order
+        # the KSampler branch uses so every profile's line reads alike.
+        found: dict[str, object] = {}
+        for node in workflow.values():
+            ct, i = node.get("class_type"), node.get("inputs", {})
+            if ct in _STEPS_CLASSES:
+                found.setdefault("steps", i.get("steps"))
+                found.setdefault("scheduler", i.get("scheduler"))
+            if ct == "CFGGuider" and "cfg" in i:
+                found.setdefault("cfg", i["cfg"])
+            if ct == "KSamplerSelect" and "sampler_name" in i:
+                found.setdefault("sampler", i["sampler_name"])
+        for field in ("steps", "cfg"):
+            if found.get(field) is not None:
+                parts.append(f"{field}={found[field]}")
+        if found.get("sampler") is not None:
+            sampler = f"sampler={found['sampler']}"
+            if found.get("scheduler") is not None:
+                sampler += f"/{found['scheduler']}"
+            parts.append(sampler)
+
+    return " ".join(parts)
+
+
 def build_workflow(req: ImageRequest, cfg: Config) -> dict:
     if cfg.profile == PROFILE_FLUX1_DEV:
         return build_flux1_dev_workflow(req, cfg)
