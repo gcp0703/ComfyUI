@@ -53,7 +53,7 @@ from azure_worker.workflow import (
 )
 
 
-def _cfg(profile: str, sdxl_loras: tuple = ()) -> Config:
+def _cfg(profile: str, sdxl_loras: tuple = (), sdxl_lora_autoroute: bool = False) -> Config:
     return Config(
         storage_connection_string="x",
         inbound_queue="i",
@@ -78,6 +78,7 @@ def _cfg(profile: str, sdxl_loras: tuple = ()) -> Config:
         qwen_rapid_checkpoint="Qwen-Rapid-AIO-NSFW-v23.safetensors",
         sdxl_checkpoint="DreamShaperXL_Turbo_v2_1.safetensors",
         sdxl_loras=sdxl_loras,
+        sdxl_lora_autoroute=sdxl_lora_autoroute,
         llm_inbound_queue="llm-requests",
         llm_outbound_queue="llm-results",
         ollama_url="http://localhost:11434",

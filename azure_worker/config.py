@@ -81,6 +81,10 @@ class Config:
     # ordered stack of fantasy-race LoRAs chained onto it.)
     sdxl_checkpoint: str
     sdxl_loras: tuple[LoraSpec, ...]
+    # When set, a race named in the prompt appends that race's own LoRA to the
+    # stack above (see lora_router). The multi-race LoRA alone does not reshape
+    # body morphology strongly enough -- dwarves render as humans without it.
+    sdxl_lora_autoroute: bool
     # LLM-side queues + Ollama HTTP endpoint (separate workload, polled with
     # priority over the image queue in the main loop). Uses Ollama's native
     # /api/chat (not OpenAI-compat) so the `think` toggle works on Qwen3.
@@ -119,6 +123,18 @@ def _optional_float(name: str, default: float) -> float:
         return float(raw)
     except ValueError as e:
         raise ConfigError(f"environment variable {name}={raw!r} is not a number") from e
+
+
+def _optional_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    lowered = raw.strip().lower()
+    if lowered in ("1", "true", "yes", "on"):
+        return True
+    if lowered in ("0", "false", "no", "off"):
+        return False
+    raise ConfigError(f"environment variable {name}={raw!r} is not a boolean")
 
 
 def _optional_loras(name: str) -> tuple[LoraSpec, ...]:
@@ -193,6 +209,7 @@ def load_config() -> Config:
         qwen_rapid_checkpoint=_require("COMFY_QWEN_RAPID_CHECKPOINT"),
         sdxl_checkpoint=_require("COMFY_SDXL_CHECKPOINT"),
         sdxl_loras=_optional_loras("COMFY_SDXL_LORAS"),
+        sdxl_lora_autoroute=_optional_bool("COMFY_SDXL_LORA_AUTOROUTE", True),
         llm_inbound_queue=_require("LLM_INBOUND_QUEUE"),
         llm_outbound_queue=_require("LLM_OUTBOUND_QUEUE"),
         ollama_url=_require("OLLAMA_URL"),

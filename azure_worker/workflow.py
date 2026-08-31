@@ -57,6 +57,7 @@ from .config import (
     PROFILE_QWEN_RAPID_AIO,
     PROFILE_SDXL_DREAMSHAPER,
 )
+from .lora_router import apply_trigger, route_race_lora
 from .messages import ImageRequest, sanitize_name
 
 
@@ -766,10 +767,21 @@ def build_sdxl_dreamshaper_workflow(req: ImageRequest, cfg: Config) -> dict:
         },
     }
 
+    # A race named in the prompt appends its own LoRA to the configured stack,
+    # and contributes its trigger token when that differs from the word that
+    # matched (rpgelf, rpggnome, rpggoblin).
+    prompt = req.prompt
+    loras = list(cfg.sdxl_loras)
+    if cfg.sdxl_lora_autoroute:
+        routed = route_race_lora(prompt)
+        if routed is not None:
+            loras.append(routed.spec)
+            prompt = apply_trigger(prompt, routed.trigger)
+
     # Chain the LoRA stack off the checkpoint; `source` tracks whatever node
     # currently provides model (output 0) and CLIP (output 1).
     source = "1"
-    for offset, lora in enumerate(cfg.sdxl_loras):
+    for offset, lora in enumerate(loras):
         node_id = str(SDXL_LORA_NODE_BASE + offset)
         workflow[node_id] = {
             "class_type": "LoraLoader",
@@ -787,7 +799,7 @@ def build_sdxl_dreamshaper_workflow(req: ImageRequest, cfg: Config) -> dict:
         {
             "2": {
                 "class_type": "CLIPTextEncode",
-                "inputs": {"clip": [source, 1], "text": req.prompt},
+                "inputs": {"clip": [source, 1], "text": prompt},
             },
             "3": {
                 "class_type": "CLIPTextEncode",
