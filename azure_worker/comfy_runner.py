@@ -22,6 +22,42 @@ class ComfyJobError(RuntimeError):
     pass
 
 
+def _collect_output_absolute_paths(history_result: dict, folder_paths) -> List[str]:
+    """Extract absolute paths for output items from a history result.
+
+    Same containment rule ComfyUI's own main.py used before the asset refactor:
+    the joined path must stay inside its output/temp base directory.
+    """
+    paths: List[str] = []
+    seen: set[str] = set()
+    for node_output in history_result.get("outputs", {}).values():
+        for items in node_output.values():
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                item_type = item.get("type")
+                if item_type not in ("output", "temp"):
+                    continue
+                base_dir = folder_paths.get_directory_by_type(item_type)
+                if base_dir is None:
+                    continue
+                base_dir = os.path.abspath(base_dir)
+                filename = item.get("filename")
+                if not filename:
+                    continue
+                abs_path = os.path.abspath(
+                    os.path.join(base_dir, item.get("subfolder", ""), filename)
+                )
+                if not abs_path.startswith(base_dir + os.sep) and abs_path != base_dir:
+                    continue
+                if abs_path not in seen:
+                    seen.add(abs_path)
+                    paths.append(abs_path)
+    return paths
+
+
 class ComfyRunner:
     """Wraps a ComfyUI PromptServer + prompt_worker for synchronous one-at-a-time use."""
 
@@ -31,9 +67,10 @@ class ComfyRunner:
         # and all module-level side effects in main.py have run.
         import main as comfy_main  # noqa: WPS433 - intentional late import
         import execution  # noqa: WPS433
+        import folder_paths  # noqa: WPS433
 
-        self._comfy_main = comfy_main
         self._execution = execution
+        self._folder_paths = folder_paths
 
         _loop, prompt_server, _start_all = comfy_main.start_comfyui()
         self._server = prompt_server
@@ -89,7 +126,7 @@ class ComfyRunner:
                 if status.get("status_str") != "success" or not status.get("completed"):
                     messages = status.get("messages") or []
                     raise ComfyJobError(f"workflow execution failed: {messages}")
-                paths = self._comfy_main._collect_output_absolute_paths(entry)
+                paths = _collect_output_absolute_paths(entry, self._folder_paths)
                 return [Path(p) for p in paths]
             if time.monotonic() > deadline:
                 raise ComfyJobError(f"workflow {prompt_id} did not complete within {timeout_seconds}s")
