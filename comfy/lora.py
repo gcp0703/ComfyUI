@@ -16,7 +16,6 @@
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 
-from __future__ import annotations
 import comfy.memory_management
 import comfy.utils
 import comfy.model_management
@@ -305,6 +304,13 @@ def model_lora_keys_unet(model, key_map={}):
                     key_map["lycoris_{}".format(key_lora.replace(".", "_"))] = k #SimpleTuner lycoris format
                     key_map["transformer.{}".format(key_lora)] = k #SimpleTuner regular format
 
+    if isinstance(model, comfy.model_base.HiDreamO1):
+        for k in sdk:
+            if k.startswith("diffusion_model."):
+                if k.endswith(".weight"):
+                    key_lora = k[len("diffusion_model."):-len(".weight")]
+                    key_map["model.{}".format(key_lora)] = k
+
     if isinstance(model, comfy.model_base.ACEStep):
         for k in sdk:
             if k.startswith("diffusion_model.") and k.endswith(".weight"): #Official ACE step lora format
@@ -321,11 +327,27 @@ def model_lora_keys_unet(model, key_map={}):
         for k in sdk:
             if k.startswith("diffusion_model.") and k.endswith(".weight"): #QwenImage lora format
                 key_lora = k[len("diffusion_model."):-len(".weight")]
-                # Direct mapping for transformer_blocks format (QwenImage LoRA format)
-                key_map["{}".format(key_lora)] = k
-                # Support transformer prefix format
-                key_map["transformer.{}".format(key_lora)] = k
-                key_map["lycoris_{}".format(key_lora.replace(".", "_"))] = k #SimpleTuner lycoris format
+                targets = [(key_lora, k)]
+                if key_lora.endswith(".img_mlp.gate_up"):  # Qwen Image 2.1 fuses gate_layer/proj at load; LoRAs address the halves
+                    half = sd[k].shape[0] // 2
+                    targets = [(key_lora.replace(".gate_up", ".gate_layer"), (k, (0, 0, half))), (key_lora.replace(".gate_up", ".proj"), (k, (0, half, half)))]
+                for key_lora, to in targets:
+                    # Direct mapping for transformer_blocks format (QwenImage LoRA format)
+                    key_map["{}".format(key_lora)] = to
+                    # Support transformer prefix format
+                    key_map["transformer.{}".format(key_lora)] = to
+                    key_map["lycoris_{}".format(key_lora.replace(".", "_"))] = to #SimpleTuner lycoris format
+
+    if isinstance(model, comfy.model_base.Krea2):
+        diffusers_keys = comfy.utils.krea2_to_diffusers(model.model_config.unet_config, output_prefix="diffusion_model.")
+        for k in diffusers_keys:
+            if k.endswith(".weight"):
+                to = diffusers_keys[k]
+                key_lora = k[:-len(".weight")]
+                key_map["diffusion_model.{}".format(key_lora)] = to
+                key_map["transformer.{}".format(key_lora)] = to
+                key_map["lycoris_{}".format(key_lora.replace(".", "_"))] = to
+                key_map[key_lora] = to
 
     if isinstance(model, comfy.model_base.Lumina2):
         diffusers_keys = comfy.utils.z_image_to_diffusers(model.model_config.unet_config, output_prefix="diffusion_model.")
@@ -357,6 +379,18 @@ def model_lora_keys_unet(model, key_map={}):
             if k.startswith("diffusion_model.") and k.endswith(".weight"):
                 key_lora = k[len("diffusion_model."):-len(".weight")]
                 key_map["transformer.{}".format(key_lora)] = k
+
+    if isinstance(model, (comfy.model_base.LTXV, comfy.model_base.LTXAV)):
+        for k in sdk:
+            if k.startswith("diffusion_model.") and k.endswith(".weight"):
+                key_lora = k[len("diffusion_model."):-len(".weight")]
+                key_map["{}".format(key_lora)] = k
+
+    if isinstance(model, comfy.model_base.MiniMaxH3):
+        for k in sdk:
+            if k.startswith("diffusion_model.") and k.endswith(".weight"):
+                key_lora = k[len("diffusion_model."):-len(".weight")]
+                key_map[key_lora] = k
 
     return key_map
 
@@ -484,16 +518,23 @@ def calculate_weight(patches, weight, key, intermediate_dtype=torch.float32, ori
 
     return weight
 
-def prefetch_prepared_value(value, allocate_buffer, stream):
+def prefetch_prepared_value(value, counter, destination, stream, copy):
     if isinstance(value, torch.Tensor):
-        dest = allocate_buffer(comfy.memory_management.vram_aligned_size(value))
-        comfy.model_management.cast_to_gathered([value], dest, non_blocking=True, stream=stream)
+        size = comfy.memory_management.vram_aligned_size(value)
+        offset = counter[0]
+        counter[0] += size
+        if destination is None:
+            return value
+
+        dest = destination[offset:offset + size]
+        if copy:
+            comfy.model_management.cast_to_gathered([value], dest, non_blocking=True, stream=stream)
         return comfy.memory_management.interpret_gathered_like([value], dest)[0]
     elif isinstance(value, weight_adapter.WeightAdapterBase):
-        return type(value)(value.loaded_keys, prefetch_prepared_value(value.weights, allocate_buffer, stream))
+        return type(value)(value.loaded_keys, prefetch_prepared_value(value.weights, counter, destination, stream, copy))
     elif isinstance(value, tuple):
-        return tuple(prefetch_prepared_value(item, allocate_buffer, stream) for item in value)
+        return tuple(prefetch_prepared_value(item, counter, destination, stream, copy) for item in value)
     elif isinstance(value, list):
-        return [prefetch_prepared_value(item, allocate_buffer, stream) for item in value]
+        return [prefetch_prepared_value(item, counter, destination, stream, copy) for item in value]
 
     return value

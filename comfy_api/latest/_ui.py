@@ -260,6 +260,7 @@ class ImageSaveHelper:
 class AudioSaveHelper:
     """A helper class with static methods to handle audio saving and metadata."""
     _OPUS_RATES = [8000, 12000, 16000, 24000, 48000]
+    _FORMATS = {"flac", "mp3", "opus"}
 
     @staticmethod
     def save_audio(
@@ -270,6 +271,9 @@ class AudioSaveHelper:
         format: str = "flac",
         quality: str = "128k",
     ) -> list[SavedResult]:
+        if format not in AudioSaveHelper._FORMATS:
+            raise ValueError(f"Unsupported audio format: {format!r}")
+
         full_output_folder, filename, counter, subfolder, _ = folder_paths.get_save_image_path(
             filename_prefix, _get_directory_by_folder_type(folder_type)
         )
@@ -285,7 +289,7 @@ class AudioSaveHelper:
         results = []
         for batch_number, waveform in enumerate(audio["waveform"].cpu()):
             filename_with_batch_num = filename.replace("%batch_num%", str(batch_number))
-            file = f"{filename_with_batch_num}_{counter:05}_.{format}"
+            file = f"{filename_with_batch_num}_{counter:05}.{format}"
             output_path = os.path.join(full_output_folder, file)
 
             # Use original sample rate initially
@@ -452,6 +456,31 @@ class PreviewUI3D(_UIOutput):
         return {"result": [self.model_file, self.camera_info, self.bg_image_path]}
 
 
+class PreviewUI3DAdvanced(_UIOutput):
+    def __init__(
+        self,
+        model_file,
+        camera_info,
+        model_3d_info,
+        folder_type: FolderType | None = None,
+        saved_result: SavedResult | None = None,
+    ):
+        self.model_file = model_file
+        self.camera_info = camera_info
+        self.model_3d_info = model_3d_info
+        self.folder_type = folder_type
+        self.saved_result = saved_result
+
+    def as_dict(self):
+        model_file = self.model_file
+        if self.folder_type is not None:
+            model_file = f"{model_file} [{FolderType(self.folder_type).value}]"
+        data = {"result": [model_file, self.camera_info, self.model_3d_info]}
+        if self.saved_result is not None:
+            data["3d"] = [self.saved_result]
+        return data
+
+
 class PreviewText(_UIOutput):
     def __init__(self, value: str, **kwargs):
         self.value = value
@@ -471,5 +500,6 @@ __all__ = [
     "PreviewAudio",
     "PreviewVideo",
     "PreviewUI3D",
+    "PreviewUI3DAdvanced",
     "PreviewText",
 ]

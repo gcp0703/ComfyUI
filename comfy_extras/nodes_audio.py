@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import av
 import torchaudio
 import torch
@@ -18,7 +16,7 @@ class EmptyLatentAudio(IO.ComfyNode):
         return IO.Schema(
             node_id="EmptyLatentAudio",
             display_name="Empty Latent Audio",
-            category="latent/audio",
+            category="model/latent",
             essentials_category="Audio",
             inputs=[
                 IO.Float.Input("seconds", default=47.6, min=1.0, max=1000.0, step=0.1),
@@ -33,7 +31,7 @@ class EmptyLatentAudio(IO.ComfyNode):
     def execute(cls, seconds, batch_size) -> IO.NodeOutput:
         length = round((seconds * 44100 / 2048) / 2) * 2
         latent = torch.zeros([batch_size, 64, length], device=comfy.model_management.intermediate_device())
-        return IO.NodeOutput({"samples":latent, "type": "audio"})
+        return IO.NodeOutput({"samples": latent, "type": "audio", "downscale_ratio_temporal": 2048})
 
     generate = execute  # TODO: remove
 
@@ -43,7 +41,7 @@ class ConditioningStableAudio(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="ConditioningStableAudio",
-            category="conditioning",
+            category="model/conditioning/stable audio",
             inputs=[
                 IO.Conditioning.Input("positive"),
                 IO.Conditioning.Input("negative"),
@@ -72,7 +70,7 @@ class VAEEncodeAudio(IO.ComfyNode):
             node_id="VAEEncodeAudio",
             search_aliases=["audio to latent"],
             display_name="VAE Encode Audio",
-            category="latent/audio",
+            category="model/latent",
             inputs=[
                 IO.Audio.Input("audio"),
                 IO.Vae.Input("vae"),
@@ -98,10 +96,14 @@ class VAEEncodeAudio(IO.ComfyNode):
 
 
 def vae_decode_audio(vae, samples, tile=None, overlap=None):
+    latent = samples["samples"]
+    if latent.is_nested:
+        latent = latent.unbind()[-1]
+
     if tile is not None:
-        audio = vae.decode_tiled(samples["samples"], tile_x=tile, tile_y=tile, overlap=overlap).movedim(-1, 1)
+        audio = vae.decode_tiled(latent, tile_x=tile, tile_y=tile, overlap=overlap).movedim(-1, 1)
     else:
-        audio = vae.decode(samples["samples"]).movedim(-1, 1)
+        audio = vae.decode(latent).movedim(-1, 1)
 
     std = torch.std(audio, dim=[1, 2], keepdim=True) * 5.0
     std[std < 1.0] = 1.0
@@ -117,7 +119,7 @@ class VAEDecodeAudio(IO.ComfyNode):
             node_id="VAEDecodeAudio",
             search_aliases=["latent to audio"],
             display_name="VAE Decode Audio",
-            category="latent/audio",
+            category="model/latent",
             inputs=[
                 IO.Latent.Input("samples"),
                 IO.Vae.Input("vae"),
@@ -139,7 +141,7 @@ class VAEDecodeAudioTiled(IO.ComfyNode):
             node_id="VAEDecodeAudioTiled",
             search_aliases=["latent to audio"],
             display_name="VAE Decode Audio (Tiled)",
-            category="latent/audio",
+            category="model/latent",
             inputs=[
                 IO.Latent.Input("samples"),
                 IO.Vae.Input("vae"),
@@ -160,7 +162,7 @@ class SaveAudio(IO.ComfyNode):
         return IO.Schema(
             node_id="SaveAudio",
             search_aliases=["export flac"],
-            display_name="Save Audio (FLAC)",
+            display_name="Save Audio (FLAC) (DEPRECATED)",
             category="audio",
             essentials_category="Audio",
             inputs=[
@@ -168,7 +170,9 @@ class SaveAudio(IO.ComfyNode):
                 IO.String.Input("filename_prefix", default="audio/ComfyUI"),
             ],
             hidden=[IO.Hidden.prompt, IO.Hidden.extra_pnginfo],
+            is_deprecated=True,
             is_output_node=True,
+            outputs=[IO.Audio.Output("audio")]
         )
 
     @classmethod
@@ -176,10 +180,9 @@ class SaveAudio(IO.ComfyNode):
         if audio is None:
             raise ValueError("SaveAudio: input audio is None (source video may have no audio track).")
         return IO.NodeOutput(
+            audio,
             ui=UI.AudioSaveHelper.get_save_audio_ui(audio, filename_prefix=filename_prefix, cls=cls, format=format)
         )
-
-    save_flac = execute  # TODO: remove
 
 
 class SaveAudioMP3(IO.ComfyNode):
@@ -188,7 +191,7 @@ class SaveAudioMP3(IO.ComfyNode):
         return IO.Schema(
             node_id="SaveAudioMP3",
             search_aliases=["export mp3"],
-            display_name="Save Audio (MP3)",
+            display_name="Save Audio (MP3) (DEPRECATED)",
             category="audio",
             essentials_category="Audio",
             inputs=[
@@ -197,7 +200,9 @@ class SaveAudioMP3(IO.ComfyNode):
                 IO.Combo.Input("quality", options=["V0", "128k", "320k"], default="V0"),
             ],
             hidden=[IO.Hidden.prompt, IO.Hidden.extra_pnginfo],
+            is_deprecated=True,
             is_output_node=True,
+            outputs=[IO.Audio.Output("audio")]
         )
 
     @classmethod
@@ -205,12 +210,11 @@ class SaveAudioMP3(IO.ComfyNode):
         if audio is None:
             raise ValueError("SaveAudioMP3: input audio is None (source video may have no audio track).")
         return IO.NodeOutput(
+            audio,
             ui=UI.AudioSaveHelper.get_save_audio_ui(
                 audio, filename_prefix=filename_prefix, cls=cls, format=format, quality=quality
             )
         )
-
-    save_mp3 = execute  # TODO: remove
 
 
 class SaveAudioOpus(IO.ComfyNode):
@@ -219,7 +223,7 @@ class SaveAudioOpus(IO.ComfyNode):
         return IO.Schema(
             node_id="SaveAudioOpus",
             search_aliases=["export opus"],
-            display_name="Save Audio (Opus)",
+            display_name="Save Audio (Opus) (DEPRECATED)",
             category="audio",
             inputs=[
                 IO.Audio.Input("audio"),
@@ -227,7 +231,9 @@ class SaveAudioOpus(IO.ComfyNode):
                 IO.Combo.Input("quality", options=["64k", "96k", "128k", "192k", "320k"], default="128k"),
             ],
             hidden=[IO.Hidden.prompt, IO.Hidden.extra_pnginfo],
+            is_deprecated=True,
             is_output_node=True,
+            outputs=[IO.Audio.Output("audio")]
         )
 
     @classmethod
@@ -235,12 +241,57 @@ class SaveAudioOpus(IO.ComfyNode):
         if audio is None:
             raise ValueError("SaveAudioOpus: input audio is None (source video may have no audio track).")
         return IO.NodeOutput(
+            audio,
             ui=UI.AudioSaveHelper.get_save_audio_ui(
                 audio, filename_prefix=filename_prefix, cls=cls, format=format, quality=quality
             )
         )
 
-    save_opus = execute  # TODO: remove
+
+class SaveAudioAdvanced(IO.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="SaveAudioAdvanced",
+            search_aliases=["save audio", "export audio", "output audio", "write audio", "flac", "mp3", "opus"],
+            display_name="Save Audio (Advanced)",
+            description="Saves the input audio to your ComfyUI output directory.",
+            category="audio",
+            inputs=[
+                IO.Audio.Input("audio", tooltip="The audio to save."),
+                IO.String.Input(
+                    "filename_prefix",
+                    default="audio/ComfyUI",
+                    tooltip=("The prefix for the file to save. May include formatting tokens such as %date:yyyy-MM-dd%."),
+                ),
+                IO.DynamicCombo.Input(
+                    "format",
+                    options=[
+                        IO.DynamicCombo.Option("flac", []),
+                        IO.DynamicCombo.Option("mp3", [
+                            IO.Combo.Input("quality", options=["V0", "128k", "320k"], default="V0"),
+                        ]),
+                        IO.DynamicCombo.Option("opus", [
+                            IO.Combo.Input("quality", options=["64k", "96k", "128k", "192k", "320k"], default="128k"),
+                        ]),
+                    ],
+                    tooltip="The file format in which to save the audio.",
+                ),
+            ],
+            hidden=[IO.Hidden.prompt, IO.Hidden.extra_pnginfo],
+            is_output_node=True,
+            outputs=[IO.Audio.Output("audio")],
+        )
+
+    @classmethod
+    def execute(cls, audio, filename_prefix: str, format: dict) -> IO.NodeOutput:
+        file_format = format.get("format", None)
+        quality = format.get("quality", None)
+        if quality:
+            ui=UI.AudioSaveHelper.get_save_audio_ui(audio, filename_prefix=filename_prefix, cls=cls, format=file_format, quality=quality)
+        else:
+            ui=UI.AudioSaveHelper.get_save_audio_ui(audio, filename_prefix=filename_prefix, cls=cls, format=file_format)
+        return IO.NodeOutput(audio, ui=ui)
 
 
 class PreviewAudio(IO.ComfyNode):
@@ -248,21 +299,23 @@ class PreviewAudio(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="PreviewAudio",
-            search_aliases=["play audio"],
+            search_aliases=["preview", "preview audio", "play audio"],
             display_name="Preview Audio",
             category="audio",
+            description="Preview the audio without saving it to the ComfyUI output directory.",
             inputs=[
                 IO.Audio.Input("audio"),
             ],
             hidden=[IO.Hidden.prompt, IO.Hidden.extra_pnginfo],
             is_output_node=True,
+            outputs=[IO.Audio.Output("audio")]
         )
 
     @classmethod
     def execute(cls, audio) -> IO.NodeOutput:
         if audio is None:
             raise ValueError("PreviewAudio: input audio is None (source video may have no audio track).")
-        return IO.NodeOutput(ui=UI.PreviewAudio(audio, cls=cls))
+        return IO.NodeOutput(audio, ui=UI.PreviewAudio(audio, cls=cls))
 
     save_flac = execute  # TODO: remove
 
@@ -543,7 +596,7 @@ class AudioConcat(IO.ComfyNode):
         return IO.Schema(
             node_id="AudioConcat",
             search_aliases=["join audio", "combine audio", "append audio"],
-            display_name="Audio Concat",
+            display_name="Concatenate Audio",
             description="Concatenates the audio1 to audio2 in the specified direction.",
             category="audio",
             inputs=[
@@ -597,7 +650,7 @@ class AudioMerge(IO.ComfyNode):
         return IO.Schema(
             node_id="AudioMerge",
             search_aliases=["mix audio", "overlay audio", "layer audio"],
-            display_name="Audio Merge",
+            display_name="Merge Audio",
             description="Combine two audio tracks by overlaying their waveforms.",
             category="audio",
             inputs=[
@@ -667,8 +720,9 @@ class AudioAdjustVolume(IO.ComfyNode):
         return IO.Schema(
             node_id="AudioAdjustVolume",
             search_aliases=["audio gain", "loudness", "audio level"],
-            display_name="Audio Adjust Volume",
+            display_name="Adjust Audio Volume",
             category="audio",
+            description="Adjust the volume of the audio by a specified amount in decibels (dB).",
             inputs=[
                 IO.Audio.Input("audio"),
                 IO.Int.Input(
@@ -823,6 +877,7 @@ class AudioExtension(ComfyExtension):
             SaveAudio,
             SaveAudioMP3,
             SaveAudioOpus,
+            SaveAudioAdvanced,
             LoadAudio,
             PreviewAudio,
             ConditioningStableAudio,

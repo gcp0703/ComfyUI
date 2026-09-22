@@ -105,7 +105,7 @@ class WindowAttention(nn.Module):
 
         relative_position_bias = self.relative_position_bias_table[self.relative_position_index.long().view(-1)].view(
             self.window_size[0] * self.window_size[1], self.window_size[0] * self.window_size[1], -1)  # Wh*Ww,Wh*Ww,nH
-        relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()  # nH, Wh*Ww, Wh*Ww
+        relative_position_bias = comfy.ops.cast_to_input(relative_position_bias.permute(2, 0, 1).contiguous(), attn)  # nH, Wh*Ww, Wh*Ww
         attn = attn + relative_position_bias.unsqueeze(0)
 
         if mask is not None:
@@ -433,19 +433,16 @@ class DeformableConv2d(nn.Module):
     def forward(self, x):
         offset = self.offset_conv(x)
         modulator = 2. * torch.sigmoid(self.modulator_conv(x))
-        weight, bias, offload_info = comfy.ops.cast_bias_weight(self.regular_conv, x, offloadable=True)
-
-        x = deform_conv2d(
-            input=x,
-            offset=offset,
-            weight=weight,
-            bias=None,
-            padding=self.padding,
-            mask=modulator,
-            stride=self.stride,
-        )
-        comfy.ops.uncast_bias_weight(self.regular_conv, weight, bias, offload_info)
-        return x
+        with comfy.ops.CastBiasWeightContext(self.regular_conv, x, offloadable=True) as (weight, _bias):
+            return deform_conv2d(
+                input=x,
+                offset=offset,
+                weight=weight,
+                bias=None,
+                padding=self.padding,
+                mask=modulator,
+                stride=self.stride,
+            )
 
 class BasicDecBlk(nn.Module):
     def __init__(self, in_channels=64, out_channels=64, inter_channels=64, device=None, dtype=None, operations=None):
