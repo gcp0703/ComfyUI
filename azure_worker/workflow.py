@@ -54,6 +54,7 @@ from .config import (
     PROFILE_FLUXED_UP,
     PROFILE_OPENFLUX1,
     PROFILE_QWEN_IMAGE_2512,
+    PROFILE_QWEN_IMAGE_2_1,
     PROFILE_QWEN_RAPID_AIO,
     PROFILE_SDXL_DREAMSHAPER,
 )
@@ -68,6 +69,7 @@ FLUX2_SAVE_NODE_ID = "12"
 CHROMA1_SAVE_NODE_ID = "14"
 FLUXED_UP_SAVE_NODE_ID = "9"
 QWEN_IMAGE_SAVE_NODE_ID = "10"
+QWEN21_SAVE_NODE_ID = "8"
 OPENFLUX1_SAVE_NODE_ID = "9"
 QWEN_RAPID_SAVE_NODE_ID = "7"
 SDXL_SAVE_NODE_ID = "9"
@@ -92,6 +94,21 @@ QWEN_IMAGE_SHIFT = 3.1
 # These are baked in, not user-tunable, because they're tied to the merge.
 QWEN_RAPID_SAMPLER = "euler_ancestral"
 QWEN_RAPID_SCHEDULER = "beta"
+
+
+# Qwen-Image 2.1 sampling defaults (from the official ComfyUI template). The
+# sigma shift (0.69) lives in the model's own sampling_settings, so unlike
+# qwen-image-2512 there is no ModelSamplingAuraFlow node here.
+QWEN21_SAMPLER = "euler"
+QWEN21_SCHEDULER = "simple"
+# Official pipeline guidance: cfg stays at 1 and the negative prompt is unused,
+# at ~40-50 steps. A higher cfg is only worth it alongside a real negative.
+QWEN21_CFG = 1.0
+# TextEncodeQwenImage21 takes `resolution` as a required input (the v3 schema
+# does not fall back to the declared default for API prompts). It only sizes
+# *reference images*, so for pure text-to-image it is inert — this just matches
+# the official template's value.
+QWEN21_RESOLUTION = 1024
 
 
 # DreamShaper XL Turbo v2.1 sampling defaults (Lykon's model card): DPM++ SDE
@@ -204,6 +221,8 @@ def build_workflow(req: ImageRequest, cfg: Config) -> dict:
         return build_fluxed_up_workflow(req, cfg)
     if cfg.profile == PROFILE_QWEN_IMAGE_2512:
         return build_qwen_image_2512_workflow(req, cfg)
+    if cfg.profile == PROFILE_QWEN_IMAGE_2_1:
+        return build_qwen_image_2_1_workflow(req, cfg)
     if cfg.profile == PROFILE_OPENFLUX1:
         return build_openflux1_workflow(req, cfg)
     if cfg.profile == PROFILE_QWEN_RAPID_AIO:
@@ -599,6 +618,83 @@ def build_qwen_image_2512_workflow(req: ImageRequest, cfg: Config) -> dict:
         QWEN_IMAGE_SAVE_NODE_ID: {
             "class_type": "SaveImage",
             "inputs": {"filename_prefix": filename_prefix, "images": ["9", 0]},
+        },
+    }
+
+
+def build_qwen_image_2_1_workflow(req: ImageRequest, cfg: Config) -> dict:
+    """Mirror of ComfyUI's ``image_qwen_image_2_1_t2i`` template.
+
+    Qwen-Image 2.1 keeps the same separate-loaders shape as ``qwen-image-2512``
+    but swaps every model file: an int8 convrot DiT, a Qwen3-VL 8B text encoder
+    loaded with ``type=qwen_image``, and the 2.1 VAE.
+
+    Two differences from the 2512 builder are worth noting:
+
+    - The prompt is encoded by ``TextEncodeQwenImage21``, which emits both the
+      positive and negative conditioning itself (no second ``CLIPTextEncode``
+      for the negative). Its image/latent outputs are for edit-style reference
+      images and stay unwired for text-to-image.
+    - There is no ``ModelSamplingAuraFlow``: the 0.69 sigma shift lives in the
+      model's own ``sampling_settings``.
+
+    The official recipe drives ``cfg=1`` with no negative prompt, so like
+    ``flux1-dev`` those two request fields are no-ops here; ``req.steps`` is
+    honored (the template starts at 25, the pipeline recommends 40-50).
+    """
+    filename_prefix = sanitize_name(req.name)
+    return {
+        "1": {
+            "class_type": "UNETLoader",
+            "inputs": {"unet_name": cfg.qwen21_unet, "weight_dtype": "default"},
+        },
+        "2": {
+            "class_type": "CLIPLoader",
+            "inputs": {"clip_name": cfg.qwen21_clip, "type": "qwen_image"},
+        },
+        "3": {
+            "class_type": "VAELoader",
+            "inputs": {"vae_name": cfg.qwen21_vae},
+        },
+        "4": {
+            "class_type": "TextEncodeQwenImage21",
+            "inputs": {
+                "clip": ["2", 0],
+                "prompt": req.prompt,
+                "negative_prompt": req.negative_prompt or "",
+                "resolution": QWEN21_RESOLUTION,
+            },
+        },
+        "5": {
+            "class_type": "EmptyLatentImage",
+            "inputs": {
+                "width": req.width,
+                "height": req.height,
+                "batch_size": 1,
+            },
+        },
+        "6": {
+            "class_type": "KSampler",
+            "inputs": {
+                "seed": req.seed,
+                "steps": req.steps,
+                "cfg": QWEN21_CFG,
+                "sampler_name": QWEN21_SAMPLER,
+                "scheduler": QWEN21_SCHEDULER,
+                "denoise": 1,
+                "model": ["1", 0],
+                "positive": ["4", 0],
+                "negative": ["4", 1],
+                "latent_image": ["5", 0],
+            },
+        },
+        "7": {
+            "class_type": "VAEDecode",
+            "inputs": {"samples": ["6", 0], "vae": ["3", 0]},
+        },
+        QWEN21_SAVE_NODE_ID: {
+            "class_type": "SaveImage",
+            "inputs": {"filename_prefix": filename_prefix, "images": ["7", 0]},
         },
     }
 

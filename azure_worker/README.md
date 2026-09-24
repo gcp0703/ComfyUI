@@ -12,19 +12,21 @@ A small worker that consumes two kinds of requests off Azure Storage Queues:
 The LLM queue is polled **first every iteration**; image jobs only run when
 the LLM queue is empty.
 
-Seven model profiles are supported and selected at startup via `COMFY_PROFILE`:
+Nine model profiles are supported and selected at startup via `COMFY_PROFILE`:
 
 | Profile | Models | Notes |
 |---|---|---|
-| `flux1-dev` | `flux1-dev.safetensors` + DualCLIP (`clip_l` + `t5xxl_fp16`) + Flux 1 VAE (`ae.safetensors`) | Guidance-distilled — `cfg` and `negative_prompt` are no-ops. |
-| `flux2-klein` | `flux-2-klein-9b-fp8.safetensors` + CLIPLoader(type=flux2) with Qwen3 + 128-ch Flux 2 VAE | Guidance-distilled — `cfg` and `negative_prompt` are no-ops. |
-| `chroma1` | `Chroma1-HD-fp8mixed.safetensors` + CLIPLoader(type=chroma) with T5-XXL + Flux 1 VAE | De-distilled — **`cfg` and `negative_prompt` are honored.** Beta scheduler, Euler sampler, sigma shift 1.0 are baked in. |
-| `fluxed-up` | `fluxedUpFluxNSFW_40DevFp8.safetensors` (fp8) + reuses flux1 DualCLIP + Flux 1 VAE | NSFW Flux 1 dev finetune. Same guidance-distilled driving as `flux1-dev` — `cfg` and `negative_prompt` are no-ops. |
+| `flux1-dev` | `flux1-dev.safetensors` + DualCLIP (`clip_l` + `t5xxl_fp16`) + Flux 1 VAE (`ae.safetensors`) | Guidance-distilled - `cfg` and `negative_prompt` are no-ops. |
+| `flux2-klein` | `flux-2-klein-9b-fp8.safetensors` + CLIPLoader(type=flux2) with Qwen3 + 128-ch Flux 2 VAE | Guidance-distilled - `cfg` and `negative_prompt` are no-ops. |
+| `chroma1` | `Chroma1-HD-fp8mixed.safetensors` + CLIPLoader(type=chroma) with T5-XXL + Flux 1 VAE | De-distilled - **`cfg` and `negative_prompt` are honored.** Beta scheduler, Euler sampler, sigma shift 1.0 are baked in. |
+| `fluxed-up` | `fluxedUpFluxNSFW_40DevFp8.safetensors` (fp8) + reuses flux1 DualCLIP + Flux 1 VAE | NSFW Flux 1 dev finetune. Same guidance-distilled driving as `flux1-dev` - `cfg` and `negative_prompt` are no-ops. |
 | `qwen-image-2512` | `qwen_image_2512_fp8_e4m3fn.safetensors` + CLIPLoader(type=qwen_image) with Qwen 2.5 VL 7B + `qwen_image_vae.safetensors` | Alibaba Qwen-Image (Dec 2025). **`cfg` and `negative_prompt` are honored.** Euler + simple, sigma shift 3.1. Recommended: steps=20-50, cfg=4.0. |
-| `openflux1` | `openflux1-v0.1.0-fp8.safetensors` (fp8) + reuses flux1 DualCLIP + Flux 1 VAE | ostris/OpenFLUX.1 — de-distilled Flux 1 schnell. Same Flux 1 architecture. **`cfg` and `negative_prompt` are honored.** Recommended: cfg≈3.5, steps≥20. |
-| `qwen-rapid-aio` | `Qwen-Rapid-AIO-NSFW-v23.safetensors` — **all-in-one** checkpoint (UNet+CLIP+VAE merged), loaded with `CheckpointLoaderSimple` + `TextEncodeQwenImageEditPlus` | Phr00t/Qwen-Image-Edit-Rapid-AIO. 4-step distilled accelerator merge — `cfg=1` + `euler_ancestral`/`beta` baked in, so **`cfg` and `negative_prompt` are no-ops**. NSFW LoRAs merged in (no trigger word). Recommended: steps=4 (4-8). |
+| `qwen-image-2.1` | `qwen_image_2.1_int8_convrot.safetensors` + CLIPLoader(type=qwen_image) with Qwen3-VL 8B + `qwen_image_2.1_vae_bf16.safetensors` | Alibaba Qwen-Image 2.1 (Sept 2026). Prompt is encoded by `TextEncodeQwenImage21`, which emits both conditioning branches. cfg=1 and `negative_prompt` are baked/no-ops on the official path; `steps` is honored (template starts at 25, pipeline recommends 40-50). Sigma shift 0.69 is in the model itself. |
+| `openflux1` | `openflux1-v0.1.0-fp8.safetensors` (fp8) + reuses flux1 DualCLIP + Flux 1 VAE | ostris/OpenFLUX.1 - de-distilled Flux 1 schnell. Same Flux 1 architecture. **`cfg` and `negative_prompt` are honored.** Recommended: cfg≈3.5, steps≥20. |
+| `qwen-rapid-aio` | `Qwen-Rapid-AIO-NSFW-v23.safetensors` - **all-in-one** checkpoint (UNet+CLIP+VAE merged), loaded with `CheckpointLoaderSimple` + `TextEncodeQwenImageEditPlus` | Phr00t/Qwen-Image-Edit-Rapid-AIO. 4-step distilled accelerator merge - `cfg=1` + `euler_ancestral`/`beta` baked in, so **`cfg` and `negative_prompt` are no-ops**. NSFW LoRAs merged in (no trigger word). Recommended: steps=4 (4-8). |
+| `sdxl-dreamshaper` | `DreamShaperXL_Turbo_v2_1.safetensors` - SDXL 1.0 checkpoint (CLIP + VAE baked in) plus an optional `LoraLoader` stack | Lykon DreamShaper XL Turbo v2.1. `dpmpp_sde`/`karras` at cfg=2 are baked in per the model card, so **`cfg` is a no-op**; `negative_prompt` and `steps` are honored (4-8 recommended). |
 
-All seven profile blocks must be filled in `.env`; only the active profile is
+All profile blocks must be filled in `.env`; only the active profile is
 actually loaded into VRAM. Switching profiles requires restarting the worker.
 
 The worker uses ComfyUI's production execution path — it boots a
@@ -52,7 +54,7 @@ pip install -r azure_worker/requirements.txt
 | `LLM_OUTBOUND_QUEUE` | yes | — | Storage Queue name for LLM results. |
 | `OLLAMA_URL` | yes | — | Base URL of a running Ollama daemon (e.g. `http://localhost:11434`). Worker POSTs to `{OLLAMA_URL}/api/chat`. |
 | `LLM_REQUEST_TIMEOUT_SECONDS` | no | `300` | Per-request HTTP timeout for the Ollama call. |
-| `COMFY_PROFILE` | yes | — | `flux1-dev`, `flux2-klein`, `chroma1`, `fluxed-up`, `qwen-image-2512`, or `openflux1`. |
+| `COMFY_PROFILE` | yes | - | `flux1-dev`, `flux2-klein`, `chroma1`, `fluxed-up`, `qwen-image-2512`, `qwen-image-2.1`, `openflux1`, `qwen-rapid-aio`, or `sdxl-dreamshaper`. |
 | `COMFY_FLUX1_UNET` | yes | — | Flux 1 UNet under `models/diffusion_models/` (e.g. `flux1-dev.safetensors`). |
 | `COMFY_FLUX1_CLIP_L` | yes | — | CLIP-L text encoder under `models/text_encoders/`. |
 | `COMFY_FLUX1_T5` | yes | — | T5-XXL text encoder under `models/text_encoders/`. |
@@ -66,7 +68,10 @@ pip install -r azure_worker/requirements.txt
 | `COMFY_FLUXEDUP_UNET` | yes | — | Fluxed Up UNet under `models/diffusion_models/` (e.g. `fluxedUpFluxNSFW_40DevFp8.safetensors`). Reuses the flux1 CLIP-L / T5 / VAE — no separate text-encoder/VAE env vars. |
 | `COMFY_QWEN_UNET` | yes | — | Qwen-Image UNet under `models/diffusion_models/` (e.g. `qwen_image_2512_fp8_e4m3fn.safetensors`). |
 | `COMFY_QWEN_CLIP` | yes | — | Qwen 2.5 VL 7B text encoder under `models/text_encoders/` (e.g. `qwen_2.5_vl_7b_fp8_scaled.safetensors`). |
-| `COMFY_QWEN_VAE` | yes | — | Qwen-Image VAE under `models/vae/` (e.g. `qwen_image_vae.safetensors`). |
+| `COMFY_QWEN_VAE` | yes | - | Qwen-Image VAE under `models/vae/` (e.g. `qwen_image_vae.safetensors`). |
+| `COMFY_QWEN21_UNET` | yes | - | Qwen-Image 2.1 DiT under `models/diffusion_models/` (e.g. `qwen_image_2.1_int8_convrot.safetensors`). The int8 convrot file carries its own quantization metadata, so it loads without a forced `weight_dtype`. |
+| `COMFY_QWEN21_CLIP` | yes | - | Qwen3-VL 8B text encoder under `models/text_encoders/` (e.g. `qwen3vl_8b_int8_convrot.safetensors`). Needs ComfyUI v0.37.0+ and comfy-kitchen 0.2.35+. |
+| `COMFY_QWEN21_VAE` | yes | - | Qwen-Image 2.1 VAE under `models/vae/` (e.g. `qwen_image_2.1_vae_bf16.safetensors`). |
 | `COMFY_OPENFLUX_UNET` | yes | — | OpenFLUX.1 UNet under `models/diffusion_models/` (e.g. `openflux1-v0.1.0-fp8.safetensors`). Reuses the flux1 CLIP-L / T5 / VAE — no separate text-encoder/VAE env vars. |
 | `SAS_EXPIRY_HOURS` | no | `24` | Lifetime of generated SAS URLs. |
 | `POLL_INTERVAL_SECONDS` | no | `2.0` | How often to poll an empty inbound queue. |
@@ -154,6 +159,11 @@ $env:COMFY_CHROMA_CLIP = "t5xxl_fp16.safetensors"
 $env:COMFY_CHROMA_VAE = "ae.safetensors"
 $env:COMFY_FLUXEDUP_UNET = "fluxedUpFluxNSFW_40DevFp8.safetensors"
 $env:COMFY_QWEN_UNET = "qwen_image_2512_fp8_e4m3fn.safetensors"
+$env:COMFY_QWEN_CLIP = "qwen_2.5_vl_7b_fp8_scaled.safetensors"
+$env:COMFY_QWEN_VAE = "qwen_image_vae.safetensors"
+$env:COMFY_QWEN21_UNET = "qwen_image_2.1_int8_convrot.safetensors"
+$env:COMFY_QWEN21_CLIP = "qwen3vl_8b_int8_convrot.safetensors"
+$env:COMFY_QWEN21_VAE = "qwen_image_2.1_vae_bf16.safetensors"
 $env:COMFY_QWEN_CLIP = "qwen_2.5_vl_7b_fp8_scaled.safetensors"
 $env:COMFY_QWEN_VAE = "qwen_image_vae.safetensors"
 $env:COMFY_OPENFLUX_UNET = "openflux1-v0.1.0-fp8.safetensors"

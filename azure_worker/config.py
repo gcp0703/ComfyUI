@@ -10,6 +10,7 @@ PROFILE_FLUX2_KLEIN = "flux2-klein"
 PROFILE_CHROMA1 = "chroma1"
 PROFILE_FLUXED_UP = "fluxed-up"
 PROFILE_QWEN_IMAGE_2512 = "qwen-image-2512"
+PROFILE_QWEN_IMAGE_2_1 = "qwen-image-2.1"
 PROFILE_OPENFLUX1 = "openflux1"
 PROFILE_QWEN_RAPID_AIO = "qwen-rapid-aio"
 PROFILE_SDXL_DREAMSHAPER = "sdxl-dreamshaper"
@@ -19,6 +20,7 @@ KNOWN_PROFILES = (
     PROFILE_CHROMA1,
     PROFILE_FLUXED_UP,
     PROFILE_QWEN_IMAGE_2512,
+    PROFILE_QWEN_IMAGE_2_1,
     PROFILE_OPENFLUX1,
     PROFILE_QWEN_RAPID_AIO,
     PROFILE_SDXL_DREAMSHAPER,
@@ -71,6 +73,11 @@ class Config:
     qwen_unet: str
     qwen_clip: str
     qwen_vae: str
+    # Qwen-Image 2.1 profile (Alibaba — Qwen3-VL 8B encoder, own 64-channel VAE,
+    # the TextEncodeQwenImage21 node that emits both conditioning branches)
+    qwen21_unet: str
+    qwen21_clip: str
+    qwen21_vae: str
     # OpenFLUX.1 profile (de-distilled Flux 1 schnell — same arch, real CFG; reuses flux1 CLIP-L/T5/VAE)
     openflux_unet: str
     # Qwen-Image-Edit Rapid AIO profile (Phr00t — all-in-one checkpoint: UNet+CLIP+VAE
@@ -205,6 +212,9 @@ def load_config() -> Config:
         qwen_unet=_require("COMFY_QWEN_UNET"),
         qwen_clip=_require("COMFY_QWEN_CLIP"),
         qwen_vae=_require("COMFY_QWEN_VAE"),
+        qwen21_unet=_require("COMFY_QWEN21_UNET"),
+        qwen21_clip=_require("COMFY_QWEN21_CLIP"),
+        qwen21_vae=_require("COMFY_QWEN21_VAE"),
         openflux_unet=_require("COMFY_OPENFLUX_UNET"),
         qwen_rapid_checkpoint=_require("COMFY_QWEN_RAPID_CHECKPOINT"),
         sdxl_checkpoint=_require("COMFY_SDXL_CHECKPOINT"),

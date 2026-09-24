@@ -13,6 +13,7 @@ from azure_worker.config import (
     PROFILE_FLUXED_UP,
     PROFILE_OPENFLUX1,
     PROFILE_QWEN_IMAGE_2512,
+    PROFILE_QWEN_IMAGE_2_1,
     PROFILE_QWEN_RAPID_AIO,
     PROFILE_SDXL_DREAMSHAPER,
     Config,
@@ -33,6 +34,7 @@ from azure_worker.workflow import (
     FLUXED_UP_SAVE_NODE_ID,
     OPENFLUX1_SAVE_NODE_ID,
     QWEN_IMAGE_SAVE_NODE_ID,
+    QWEN21_SAVE_NODE_ID,
     QWEN_RAPID_SAVE_NODE_ID,
     SDXL_CFG,
     SDXL_LORA_NODE_BASE,
@@ -45,6 +47,7 @@ from azure_worker.workflow import (
     build_fluxed_up_workflow,
     build_openflux1_workflow,
     build_qwen_image_2512_workflow,
+    build_qwen_image_2_1_workflow,
     build_qwen_rapid_aio_workflow,
     build_sdxl_dreamshaper_workflow,
     build_workflow,
@@ -74,6 +77,9 @@ def _cfg(profile: str, sdxl_loras: tuple = (), sdxl_lora_autoroute: bool = False
         qwen_unet="qwen_image_2512_fp8_e4m3fn.safetensors",
         qwen_clip="qwen_2.5_vl_7b_fp8_scaled.safetensors",
         qwen_vae="qwen_image_vae.safetensors",
+        qwen21_unet="qwen_image_2.1_int8_convrot.safetensors",
+        qwen21_clip="qwen3vl_8b_int8_convrot.safetensors",
+        qwen21_vae="qwen_image_2.1_vae_bf16.safetensors",
         openflux_unet="openflux1-v0.1.0-fp8.safetensors",
         qwen_rapid_checkpoint="Qwen-Rapid-AIO-NSFW-v23.safetensors",
         sdxl_checkpoint="DreamShaperXL_Turbo_v2_1.safetensors",
@@ -335,6 +341,77 @@ def test_dispatcher_picks_qwen_image_for_qwen_image_profile():
     wf = build_workflow(req, _cfg(PROFILE_QWEN_IMAGE_2512))
     assert wf["2"]["inputs"]["type"] == "qwen_image"
     assert wf[QWEN_IMAGE_SAVE_NODE_ID]["class_type"] == "SaveImage"
+
+
+# -- Qwen-Image 2.1 workflow --
+
+def test_qwen_image_2_1_workflow_shape():
+    req = ImageRequest.from_json(_sample_payload(
+        prompt="dragon",
+        negative_prompt="blurry, low quality",
+        seed=99,
+        width=1024,
+        height=1024,
+        steps=40,
+        cfg=7.0,
+    ))
+    wf = build_qwen_image_2_1_workflow(req, _cfg(PROFILE_QWEN_IMAGE_2_1))
+
+    assert wf["1"]["class_type"] == "UNETLoader"
+    assert wf["1"]["inputs"]["unet_name"] == "qwen_image_2.1_int8_convrot.safetensors"
+    # int8_convrot carries its own quant metadata, so no forced weight_dtype
+    assert wf["1"]["inputs"]["weight_dtype"] == "default"
+
+    assert wf["2"]["class_type"] == "CLIPLoader"
+    assert wf["2"]["inputs"]["clip_name"] == "qwen3vl_8b_int8_convrot.safetensors"
+    assert wf["2"]["inputs"]["type"] == "qwen_image"
+
+    assert wf["3"]["inputs"]["vae_name"] == "qwen_image_2.1_vae_bf16.safetensors"
+
+    # One encoder node emits both conditioning branches
+    enc = wf["4"]
+    assert enc["class_type"] == "TextEncodeQwenImage21"
+    assert enc["inputs"]["prompt"] == "dragon"
+    assert enc["inputs"]["negative_prompt"] == "blurry, low quality"
+    assert enc["inputs"]["clip"] == ["2", 0]
+    # Required by the v3 schema; only sizes reference images, inert for t2i
+    assert enc["inputs"]["resolution"] == 1024
+
+    assert wf["5"]["class_type"] == "EmptyLatentImage"
+    assert wf["5"]["inputs"]["width"] == 1024 and wf["5"]["inputs"]["height"] == 1024
+
+    # No ModelSamplingAuraFlow: the sigma shift is in the model's own settings
+    assert not any(n["class_type"] == "ModelSamplingAuraFlow" for n in wf.values())
+
+    ks = wf["6"]
+    assert ks["class_type"] == "KSampler"
+    assert ks["inputs"]["seed"] == 99
+    assert ks["inputs"]["steps"] == 40
+    assert ks["inputs"]["sampler_name"] == "euler"
+    assert ks["inputs"]["scheduler"] == "simple"
+    # Official path runs at cfg=1, so a request cfg of 7.0 is ignored
+    assert ks["inputs"]["cfg"] == 1
+    assert ks["inputs"]["positive"] == ["4", 0]
+    assert ks["inputs"]["negative"] == ["4", 1]
+
+    assert wf["7"]["class_type"] == "VAEDecode"
+    assert wf[QWEN21_SAVE_NODE_ID]["class_type"] == "SaveImage"
+    assert wf[QWEN21_SAVE_NODE_ID]["inputs"]["filename_prefix"] == "test-image"
+
+
+def test_dispatcher_picks_qwen_image_2_1_profile():
+    req = ImageRequest.from_json(_sample_payload())
+    wf = build_workflow(req, _cfg(PROFILE_QWEN_IMAGE_2_1))
+    assert wf["4"]["class_type"] == "TextEncodeQwenImage21"
+    assert wf[QWEN21_SAVE_NODE_ID]["class_type"] == "SaveImage"
+
+
+def test_qwen_image_2_1_cfg_is_reported_as_baked():
+    """The worker logs the ignored-cfg notice off this, so it must read back 1.0."""
+    req = ImageRequest.from_json(_sample_payload(cfg=7.0))
+    wf = build_workflow(req, _cfg(PROFILE_QWEN_IMAGE_2_1))
+    assert effective_cfg(wf) == 1.0
+    assert "cfg=1.0" in summarize_workflow(wf)
 
 
 # -- OpenFLUX.1 workflow --
