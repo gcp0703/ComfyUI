@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 
 import pytest
@@ -368,8 +369,15 @@ def test_qwen_image_2_1_workflow_shape():
 
     assert wf["3"]["inputs"]["vae_name"] == "qwen_image_2.1_vae_bf16.safetensors"
 
+    # Dynamic shift: the model's own settings pin the 1024x1024 mu (0.69), so
+    # the builder patches exp(mu) in per request. At 1024x1024 that's e^0.6935.
+    shifter = wf["4"]
+    assert shifter["class_type"] == "ModelSamplingAuraFlow"
+    assert shifter["inputs"]["model"] == ["1", 0]
+    assert shifter["inputs"]["shift"] == pytest.approx(math.exp(0.6935483870967742), rel=1e-6)
+
     # One encoder node emits both conditioning branches
-    enc = wf["4"]
+    enc = wf["5"]
     assert enc["class_type"] == "TextEncodeQwenImage21"
     assert enc["inputs"]["prompt"] == "dragon"
     assert enc["inputs"]["negative_prompt"] == "blurry, low quality"
@@ -377,13 +385,10 @@ def test_qwen_image_2_1_workflow_shape():
     # Required by the v3 schema; only sizes reference images, inert for t2i
     assert enc["inputs"]["resolution"] == 1024
 
-    assert wf["5"]["class_type"] == "EmptyLatentImage"
-    assert wf["5"]["inputs"]["width"] == 1024 and wf["5"]["inputs"]["height"] == 1024
+    assert wf["6"]["class_type"] == "EmptyLatentImage"
+    assert wf["6"]["inputs"]["width"] == 1024 and wf["6"]["inputs"]["height"] == 1024
 
-    # No ModelSamplingAuraFlow: the sigma shift is in the model's own settings
-    assert not any(n["class_type"] == "ModelSamplingAuraFlow" for n in wf.values())
-
-    ks = wf["6"]
+    ks = wf["7"]
     assert ks["class_type"] == "KSampler"
     assert ks["inputs"]["seed"] == 99
     assert ks["inputs"]["steps"] == 40
@@ -391,18 +396,29 @@ def test_qwen_image_2_1_workflow_shape():
     assert ks["inputs"]["scheduler"] == "simple"
     # Official path runs at cfg=1, so a request cfg of 7.0 is ignored
     assert ks["inputs"]["cfg"] == 1
-    assert ks["inputs"]["positive"] == ["4", 0]
-    assert ks["inputs"]["negative"] == ["4", 1]
+    # Sampling off the shift-patched model, not the raw loader
+    assert ks["inputs"]["model"] == ["4", 0]
+    assert ks["inputs"]["positive"] == ["5", 0]
+    assert ks["inputs"]["negative"] == ["5", 1]
 
-    assert wf["7"]["class_type"] == "VAEDecode"
+    assert wf["8"]["class_type"] == "VAEDecode"
     assert wf[QWEN21_SAVE_NODE_ID]["class_type"] == "SaveImage"
     assert wf[QWEN21_SAVE_NODE_ID]["inputs"]["filename_prefix"] == "test-image"
+
+
+def test_qwen_image_2_1_shift_grows_with_resolution():
+    """2K needs a markedly larger mu than 1K, per the released dynamic-shift config."""
+    req = ImageRequest.from_json(_sample_payload(width=2048, height=2048))
+    wf = build_qwen_image_2_1_workflow(req, _cfg(PROFILE_QWEN_IMAGE_2_1))
+
+    # calculate_shift(16384) = 1.3129...
+    assert wf["4"]["inputs"]["shift"] == pytest.approx(math.exp(1.3129032258064517), rel=1e-6)
 
 
 def test_dispatcher_picks_qwen_image_2_1_profile():
     req = ImageRequest.from_json(_sample_payload())
     wf = build_workflow(req, _cfg(PROFILE_QWEN_IMAGE_2_1))
-    assert wf["4"]["class_type"] == "TextEncodeQwenImage21"
+    assert wf["5"]["class_type"] == "TextEncodeQwenImage21"
     assert wf[QWEN21_SAVE_NODE_ID]["class_type"] == "SaveImage"
 
 
@@ -412,6 +428,20 @@ def test_qwen_image_2_1_cfg_is_reported_as_baked():
     wf = build_workflow(req, _cfg(PROFILE_QWEN_IMAGE_2_1))
     assert effective_cfg(wf) == 1.0
     assert "cfg=1.0" in summarize_workflow(wf)
+
+
+def test_qwen_image_2_1_shift_is_reported_per_resolution():
+    """The dynamic shift is a per-job sampling input, so the log line must show it."""
+    line_1k = summarize_workflow(
+        build_workflow(ImageRequest.from_json(_sample_payload(width=1024, height=1024)),
+                       _cfg(PROFILE_QWEN_IMAGE_2_1))
+    )
+    line_2k = summarize_workflow(
+        build_workflow(ImageRequest.from_json(_sample_payload(width=2048, height=2048)),
+                       _cfg(PROFILE_QWEN_IMAGE_2_1))
+    )
+    assert "shift=2.0008" in line_1k
+    assert "shift=3.7169" in line_2k
 
 
 # -- OpenFLUX.1 workflow --
@@ -732,6 +762,7 @@ def test_effective_cfg_reports_honored_value_for_real_cfg_profiles():
         PROFILE_CHROMA1,
         PROFILE_FLUXED_UP,
         PROFILE_QWEN_IMAGE_2512,
+        PROFILE_QWEN_IMAGE_2_1,
         PROFILE_OPENFLUX1,
         PROFILE_QWEN_RAPID_AIO,
         PROFILE_SDXL_DREAMSHAPER,

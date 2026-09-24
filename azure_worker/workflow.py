@@ -1,6 +1,6 @@
 """ComfyUI workflow builders.
 
-Eight profiles are supported, selected at startup via `COMFY_PROFILE`:
+Nine profiles are supported, selected at startup via `COMFY_PROFILE`:
 
 - ``flux1-dev`` — the classic Flux 1 dev pipeline (UNETLoader + DualCLIPLoader
   with clip_l + T5-XXL + the Flux 1 VAE), shaped to match the official
@@ -21,6 +21,13 @@ Eight profiles are supported, selected at startup via `COMFY_PROFILE`:
   fp8 + CLIPLoader(type=qwen_image) with Qwen 2.5 VL 7B + its own VAE,
   ``ModelSamplingAuraFlow`` (sigma shift 3.1), stock KSampler (euler/simple).
   Like chroma1, honors ``req.cfg`` and ``req.negative_prompt``.
+- ``qwen-image-2.1`` — Alibaba Qwen-Image 2.1 (September 2026). Separately
+  loaded int8 convrot DiT + Qwen3-VL 8B text encoder + RGBA VAE (64-channel
+  latent), prompted through ``TextEncodeQwenImage21`` (which emits both
+  conditioning branches). The DiT's own sigma shift is pinned to its
+  1024x1024 value at load, so the worker re-derives it per request from
+  ``width``/``height`` (the released dynamic-shift scheduler) and patches it
+  in with ``ModelSamplingAuraFlow``.
 - ``openflux1`` — ostris/OpenFLUX.1, a de-distilled Flux 1 schnell. Same Flux 1
   architecture as flux1-dev (reuses CLIP-L + T5-XXL + ae.safetensors VAE) but
   loads the OpenFLUX UNet in fp8 mode and drives KSampler with real ``req.cfg``
@@ -46,6 +53,8 @@ A single ``build_workflow(req, cfg)`` dispatcher picks the right builder.
 """
 from __future__ import annotations
 
+import math
+
 from .config import (
     Config,
     PROFILE_CHROMA1,
@@ -69,7 +78,7 @@ FLUX2_SAVE_NODE_ID = "12"
 CHROMA1_SAVE_NODE_ID = "14"
 FLUXED_UP_SAVE_NODE_ID = "9"
 QWEN_IMAGE_SAVE_NODE_ID = "10"
-QWEN21_SAVE_NODE_ID = "8"
+QWEN21_SAVE_NODE_ID = "9"
 OPENFLUX1_SAVE_NODE_ID = "9"
 QWEN_RAPID_SAVE_NODE_ID = "7"
 SDXL_SAVE_NODE_ID = "9"
@@ -96,9 +105,9 @@ QWEN_RAPID_SAMPLER = "euler_ancestral"
 QWEN_RAPID_SCHEDULER = "beta"
 
 
-# Qwen-Image 2.1 sampling defaults (from the official ComfyUI template). The
-# sigma shift (0.69) lives in the model's own sampling_settings, so unlike
-# qwen-image-2512 there is no ModelSamplingAuraFlow node here.
+# Qwen-Image 2.1 sampling defaults. The official template runs a fixed shift
+# because it only ever samples at one resolution; the worker re-derives the
+# shift per request from the real width/height (see qwen21_shift) instead.
 QWEN21_SAMPLER = "euler"
 QWEN21_SCHEDULER = "simple"
 # Official pipeline guidance: cfg stays at 1 and the negative prompt is unused,
@@ -109,6 +118,36 @@ QWEN21_CFG = 1.0
 # *reference images*, so for pure text-to-image it is inert — this just matches
 # the official template's value.
 QWEN21_RESOLUTION = 1024
+
+# The 2.1 scheduler config ships `use_dynamic_shifting: true` with
+# base_image_seq_len 256 / base_shift 0.5 / max_image_seq_len 8192 / max_shift
+# 0.9, so mu grows linearly with the latent token count. ComfyUI's own
+# sampling_settings pin mu to the 1024x1024 value (0.69) for every resolution:
+# ModelSamplingFlux bakes one sigma table at model load, and nothing re-reads
+# the latent size at sample time. At 2048x2048 that leaves sigma off by ~0.125
+# mid-schedule, which visibly under-shifts 2K output. Re-deriving mu from the
+# request's dimensions and patching it in with ModelSamplingAuraFlow restores
+# the published schedule; the node's alpha parameterization is the same flow
+# shift expressed as alpha = exp(mu) (verified to 2e-7 against
+# ModelSamplingFlux's own sigma table).
+QWEN21_SHIFT_BASE_TOKENS = 256
+QWEN21_SHIFT_MAX_TOKENS = 8192
+QWEN21_SHIFT_BASE = 0.5
+QWEN21_SHIFT_MAX = 0.9
+
+
+def qwen21_shift(width: int, height: int) -> float:
+    """The Qwen-Image 2.1 dynamic-shift mu for a latent of ``width`` x ``height``.
+
+    ``calculate_shift`` from the released scheduler config, in the alpha form
+    ``ModelSamplingAuraFlow`` expects. The DiT downsamples pixels by 16, so the
+    token count is ``(w // 16) * (h // 16)``.
+    """
+    tokens = (width // 16) * (height // 16)
+    mu = QWEN21_SHIFT_BASE + (QWEN21_SHIFT_MAX - QWEN21_SHIFT_BASE) * (
+        tokens - QWEN21_SHIFT_BASE_TOKENS
+    ) / (QWEN21_SHIFT_MAX_TOKENS - QWEN21_SHIFT_BASE_TOKENS)
+    return math.exp(mu)
 
 
 # DreamShaper XL Turbo v2.1 sampling defaults (Lykon's model card): DPM++ SDE
@@ -175,6 +214,14 @@ def summarize_workflow(workflow: dict) -> str:
         for nid in lora_ids
     ]
     parts.append("loras=" + (",".join(loras) if loras else "none"))
+
+    # Profiles driven through ModelSamplingAuraFlow state their sigma shift
+    # explicitly: for qwen-image-2.1 it is re-derived per request from the
+    # target resolution, so it is a real sampling input that varies per job.
+    for node in workflow.values():
+        if node.get("class_type") == "ModelSamplingAuraFlow":
+            parts.append("shift={:.4f}".format(node["inputs"]["shift"]))
+            break
 
     for node in workflow.values():
         if node.get("class_type") in _KSAMPLER_CLASSES:
@@ -635,8 +682,11 @@ def build_qwen_image_2_1_workflow(req: ImageRequest, cfg: Config) -> dict:
       positive and negative conditioning itself (no second ``CLIPTextEncode``
       for the negative). Its image/latent outputs are for edit-style reference
       images and stay unwired for text-to-image.
-    - There is no ``ModelSamplingAuraFlow``: the 0.69 sigma shift lives in the
-      model's own ``sampling_settings``.
+    - ``ModelSamplingAuraFlow`` carries the sigma shift. The released scheduler
+      is dynamic (``use_dynamic_shifting``), so unlike the 2512 builder's fixed
+      3.1, the shift is computed per request from ``req.width``/``req.height``
+      — see :func:`qwen21_shift`. ComfyUI's own ``sampling_settings`` for this
+      model pin the 1024x1024 value for every resolution.
 
     The official recipe drives ``cfg=1`` with no negative prompt, so like
     ``flux1-dev`` those two request fields are no-ops here; ``req.steps`` is
@@ -657,6 +707,13 @@ def build_qwen_image_2_1_workflow(req: ImageRequest, cfg: Config) -> dict:
             "inputs": {"vae_name": cfg.qwen21_vae},
         },
         "4": {
+            "class_type": "ModelSamplingAuraFlow",
+            "inputs": {
+                "model": ["1", 0],
+                "shift": qwen21_shift(req.width, req.height),
+            },
+        },
+        "5": {
             "class_type": "TextEncodeQwenImage21",
             "inputs": {
                 "clip": ["2", 0],
@@ -665,7 +722,7 @@ def build_qwen_image_2_1_workflow(req: ImageRequest, cfg: Config) -> dict:
                 "resolution": QWEN21_RESOLUTION,
             },
         },
-        "5": {
+        "6": {
             "class_type": "EmptyLatentImage",
             "inputs": {
                 "width": req.width,
@@ -673,7 +730,7 @@ def build_qwen_image_2_1_workflow(req: ImageRequest, cfg: Config) -> dict:
                 "batch_size": 1,
             },
         },
-        "6": {
+        "7": {
             "class_type": "KSampler",
             "inputs": {
                 "seed": req.seed,
@@ -682,19 +739,19 @@ def build_qwen_image_2_1_workflow(req: ImageRequest, cfg: Config) -> dict:
                 "sampler_name": QWEN21_SAMPLER,
                 "scheduler": QWEN21_SCHEDULER,
                 "denoise": 1,
-                "model": ["1", 0],
-                "positive": ["4", 0],
-                "negative": ["4", 1],
-                "latent_image": ["5", 0],
+                "model": ["4", 0],
+                "positive": ["5", 0],
+                "negative": ["5", 1],
+                "latent_image": ["6", 0],
             },
         },
-        "7": {
+        "8": {
             "class_type": "VAEDecode",
-            "inputs": {"samples": ["6", 0], "vae": ["3", 0]},
+            "inputs": {"samples": ["7", 0], "vae": ["3", 0]},
         },
         QWEN21_SAVE_NODE_ID: {
             "class_type": "SaveImage",
-            "inputs": {"filename_prefix": filename_prefix, "images": ["7", 0]},
+            "inputs": {"filename_prefix": filename_prefix, "images": ["8", 0]},
         },
     }
 

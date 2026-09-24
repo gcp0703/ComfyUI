@@ -21,7 +21,7 @@ Nine model profiles are supported and selected at startup via `COMFY_PROFILE`:
 | `chroma1` | `Chroma1-HD-fp8mixed.safetensors` + CLIPLoader(type=chroma) with T5-XXL + Flux 1 VAE | De-distilled - **`cfg` and `negative_prompt` are honored.** Beta scheduler, Euler sampler, sigma shift 1.0 are baked in. |
 | `fluxed-up` | `fluxedUpFluxNSFW_40DevFp8.safetensors` (fp8) + reuses flux1 DualCLIP + Flux 1 VAE | NSFW Flux 1 dev finetune. Same guidance-distilled driving as `flux1-dev` - `cfg` and `negative_prompt` are no-ops. |
 | `qwen-image-2512` | `qwen_image_2512_fp8_e4m3fn.safetensors` + CLIPLoader(type=qwen_image) with Qwen 2.5 VL 7B + `qwen_image_vae.safetensors` | Alibaba Qwen-Image (Dec 2025). **`cfg` and `negative_prompt` are honored.** Euler + simple, sigma shift 3.1. Recommended: steps=20-50, cfg=4.0. |
-| `qwen-image-2.1` | `qwen_image_2.1_int8_convrot.safetensors` + CLIPLoader(type=qwen_image) with Qwen3-VL 8B + `qwen_image_2.1_vae_bf16.safetensors` | Alibaba Qwen-Image 2.1 (Sept 2026). Prompt is encoded by `TextEncodeQwenImage21`, which emits both conditioning branches. cfg=1 and `negative_prompt` are baked/no-ops on the official path; `steps` is honored (template starts at 25, pipeline recommends 40-50). Sigma shift 0.69 is in the model itself. |
+| `qwen-image-2.1` | `qwen_image_2.1_int8_convrot.safetensors` + CLIPLoader(type=qwen_image) with Qwen3-VL 8B + `qwen_image_2.1_vae_bf16.safetensors` | Alibaba Qwen-Image 2.1 (Sept 2026). Prompt is encoded by `TextEncodeQwenImage21`, which emits both conditioning branches. cfg=1 and `negative_prompt` are baked/no-ops on the official path; `steps` is honored (template starts at 25, pipeline recommends 40-50). The official dynamic shift is re-derived per request from `width`/`height` and patched in, so 2K output gets the model's tuned schedule. |
 | `openflux1` | `openflux1-v0.1.0-fp8.safetensors` (fp8) + reuses flux1 DualCLIP + Flux 1 VAE | ostris/OpenFLUX.1 - de-distilled Flux 1 schnell. Same Flux 1 architecture. **`cfg` and `negative_prompt` are honored.** Recommended: cfg≈3.5, steps≥20. |
 | `qwen-rapid-aio` | `Qwen-Rapid-AIO-NSFW-v23.safetensors` - **all-in-one** checkpoint (UNet+CLIP+VAE merged), loaded with `CheckpointLoaderSimple` + `TextEncodeQwenImageEditPlus` | Phr00t/Qwen-Image-Edit-Rapid-AIO. 4-step distilled accelerator merge - `cfg=1` + `euler_ancestral`/`beta` baked in, so **`cfg` and `negative_prompt` are no-ops**. NSFW LoRAs merged in (no trigger word). Recommended: steps=4 (4-8). |
 | `sdxl-dreamshaper` | `DreamShaperXL_Turbo_v2_1.safetensors` - SDXL 1.0 checkpoint (CLIP + VAE baked in) plus an optional `LoraLoader` stack | Lykon DreamShaper XL Turbo v2.1. `dpmpp_sde`/`karras` at cfg=2 are baked in per the model card, so **`cfg` is a no-op**; `negative_prompt` and `steps` are honored (4-8 recommended). |
@@ -109,11 +109,14 @@ ComfyUI argparser never sees foreign options.
 - `width` and `height` must be in `[64, 4096]` and multiples of 16.
 - `negative_prompt` and `cfg` are **honored on `chroma1`, `qwen-image-2512`,
   and `openflux1`**. Flux 1 dev and Fluxed Up both use `KSampler(cfg=1)` with
-  `ConditioningZeroOut`; Flux 2 Klein uses `BasicGuider` with no negative path.
-  Recommended values:
+  `ConditioningZeroOut`; Flux 2 Klein uses `BasicGuider` with no negative path;
+  Qwen-Image 2.1 bakes `cfg=1` and ignores the negative. Recommended values:
   - **Chroma**: `steps=26, cfg=3.5` (workable range 3.5–7), native 1024² or 1152².
   - **Qwen-Image 2512**: `steps=20–50, cfg=4.0`, native 1328² (aspect-ratio
     sweet spots: 1664×928 16:9, 1472×1104 4:3, 1584×1056 3:2).
+  - **Qwen-Image 2.1**: `steps=40–50` (25 is a usable floor; `cfg=1`, so
+    `cfg`/`negative_prompt` are no-ops). Native 2K, so up to 2048×2048; the
+    per-resolution shift is derived from the requested size automatically.
   - **OpenFLUX.1**: `steps≥20, cfg≈3.5`, native 1024² (any Flux 1 resolution works).
 - A missing/invalid message produces an error result and is deleted from the
   inbound queue (no retries yet).
