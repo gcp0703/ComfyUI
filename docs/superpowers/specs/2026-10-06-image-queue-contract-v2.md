@@ -51,13 +51,41 @@ Prompt button displayed numbers that never reached the sampler.
 |---|---|---|---|
 | `job_id` | string | no | Worker generates a UUID if omitted. **Always send your own** — it is the only durable correlation key (SPEC §8). |
 | `name` | string | **yes** | Non-empty. Becomes the PNG filename prefix, sanitized (non-alphanumerics → `_`). Need not be unique. |
-| `prompt` | string | **yes** | Non-empty. Max **4096** characters. |
-| `negative_prompt` | string | no | Max 4096 characters. Honored only on some profiles — the result tells you which, see `render.negative_honored`. |
+| `prompt` | string | **yes** | Non-empty. `prompt` + `negative_prompt` combined ≤ **32,000 characters** — see *Prompt length* below. |
+| `negative_prompt` | string | no | Counts toward the same 32,000-character budget as `prompt`. Honored only on some profiles — the result tells you which, see `render.negative_honored`. |
 | `seed` | integer | no | 64-bit unsigned. Omitted → the worker picks one at random and reports it back, so any render stays reproducible. |
 
-> **Note:** `azure_worker/SPEC.md` §5 currently documents a 4000-character
-> limit. The implemented limit is 4096 (`messages.py: MAX_PROMPT_CHARS`). 4096
-> is correct; the old doc is wrong.
+### Prompt length
+
+**`prompt` and `negative_prompt` together may total at most 32,000
+characters.** This replaces the per-field 4096 limit in v1.
+
+The limit is profile-independent, so the client can enforce it before sending
+without knowing which model the worker has loaded.
+
+Where the number comes from, so nobody mistakes it for a model property:
+
+- The v1 cap of 4096 (`messages.py: MAX_PROMPT_CHARS`) was arbitrary. No
+  text encoder in the active profiles truncates input — the Qwen-VL encoders
+  behind `qwen-image-2512`, `qwen-image-2.1` and `qwen-rapid-aio` pass every
+  token through.
+- The only hard ceiling is transport: an Azure Storage Queue message is
+  **64 KiB after base64 encoding**, about 48 KB of raw JSON, shared by every
+  field in the message.
+- The queue counts **bytes, not characters**. Non-ASCII text (em-dashes are 3
+  bytes in UTF-8) and JSON escaping both inflate the byte count. 32,000
+  characters leaves enough margin that the message fits even if the prompt is
+  heavy with such characters.
+
+The worker enforces the 32,000-character rule and, as a backstop, the true
+byte limit of the encoded message. Exceeding either produces an `error` result
+with a message naming the limit; it never surfaces as an SDK exception.
+
+**This is a transport limit, not a quality promise.** The Qwen-Image models
+were trained on long structured captions and tolerate length far better than
+CLIP-based models, but nobody has measured output quality at 30,000
+characters. Length past a few thousand characters is permitted, not
+recommended.
 
 ### Removed fields
 
@@ -398,5 +426,9 @@ Not client concerns, listed so the two sides stay in step:
   move into `profiles.toml` and are deleted from code.
 - `qwen21_shift()` stays in code — it is a function of output size, not a
   constant.
+- `messages.py`: `MAX_PROMPT_CHARS` becomes a combined 32,000-character check
+  across `prompt` + `negative_prompt`, plus a byte-length check on the
+  serialized message against the queue's 64 KiB post-base64 ceiling (raw JSON
+  ≤ 48 KiB). Both reject with a validation error naming the limit.
 - `azure_worker/SPEC.md` §5/§6 and the README profile table get updated to
   match, or replaced by a pointer to this document and to `profiles.toml`.
