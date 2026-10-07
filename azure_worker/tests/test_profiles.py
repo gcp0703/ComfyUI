@@ -89,3 +89,28 @@ def test_unknown_key_is_an_error(tmp_path):
 def test_default_path_points_inside_the_package():
     assert DEFAULT_PROFILES_PATH.name == "profiles.toml"
     assert DEFAULT_PROFILES_PATH.parent.name == "azure_worker"
+
+
+def test_load_config_attaches_active_profile_render_settings(monkeypatch):
+    from azure_worker.config import load_config
+
+    env = {
+        "COMFY_PROFILE": "qwen-rapid-aio",
+        "AZURE_STORAGE_CONNECTION_STRING": "x", "AZURE_INBOUND_QUEUE": "i",
+        "AZURE_OUTBOUND_QUEUE": "o", "AZURE_BLOB_CONTAINER": "c",
+        "COMFY_FLUX1_UNET": "a", "COMFY_FLUX1_CLIP_L": "a", "COMFY_FLUX1_T5": "a", "COMFY_FLUX1_VAE": "a",
+        "COMFY_FLUX2_UNET": "a", "COMFY_FLUX2_CLIP": "a", "COMFY_FLUX2_VAE": "a",
+        "COMFY_CHROMA_UNET": "a", "COMFY_CHROMA_CLIP": "a", "COMFY_CHROMA_VAE": "a",
+        "COMFY_FLUXEDUP_UNET": "a",
+        "COMFY_QWEN_UNET": "a", "COMFY_QWEN_CLIP": "a", "COMFY_QWEN_VAE": "a",
+        "COMFY_QWEN21_UNET": "a", "COMFY_QWEN21_CLIP": "a", "COMFY_QWEN21_VAE": "a",
+        "COMFY_OPENFLUX_UNET": "a", "COMFY_QWEN_RAPID_CHECKPOINT": "a", "COMFY_SDXL_CHECKPOINT": "a",
+        "LLM_INBOUND_QUEUE": "l", "LLM_OUTBOUND_QUEUE": "m", "OLLAMA_URL": "http://x",
+    }
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+
+    cfg = load_config()
+    assert cfg.render.steps == 4
+    assert cfg.render.sampler == "euler_ancestral"
+    assert (cfg.render.width, cfg.render.height) == (1024, 1024)

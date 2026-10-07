@@ -4,6 +4,8 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+from .profiles import ProfileError, RenderSettings, load_profiles
+
 
 PROFILE_FLUX1_DEV = "flux1-dev"
 PROFILE_FLUX2_KLEIN = "flux2-klein"
@@ -92,6 +94,10 @@ class Config:
     # stack above (see lora_router). The multi-race LoRA alone does not reshape
     # body morphology strongly enough -- dwarves render as humans without it.
     sdxl_lora_autoroute: bool
+    # The active profile's render settings (size, steps, cfg, sampler) from
+    # profiles.toml. The job message no longer carries these; the worker owns
+    # them and reports what it used on every result.
+    render: RenderSettings
     # LLM-side queues + Ollama HTTP endpoint (separate workload, polled with
     # priority over the image queue in the main loop). Uses Ollama's native
     # /api/chat (not OpenAI-compat) so the `think` toggle works on Qwen3.
@@ -192,6 +198,11 @@ def load_config() -> Config:
             f"COMFY_PROFILE={profile!r} not recognized; expected one of {KNOWN_PROFILES}"
         )
 
+    try:
+        profiles = load_profiles(required=KNOWN_PROFILES)
+    except ProfileError as e:
+        raise ConfigError(str(e)) from e
+
     return Config(
         storage_connection_string=_require("AZURE_STORAGE_CONNECTION_STRING"),
         inbound_queue=_require("AZURE_INBOUND_QUEUE"),
@@ -220,6 +231,7 @@ def load_config() -> Config:
         sdxl_checkpoint=_require("COMFY_SDXL_CHECKPOINT"),
         sdxl_loras=_optional_loras("COMFY_SDXL_LORAS"),
         sdxl_lora_autoroute=_optional_bool("COMFY_SDXL_LORA_AUTOROUTE", True),
+        render=profiles[profile],
         llm_inbound_queue=_require("LLM_INBOUND_QUEUE"),
         llm_outbound_queue=_require("LLM_OUTBOUND_QUEUE"),
         ollama_url=_require("OLLAMA_URL"),
