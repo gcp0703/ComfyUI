@@ -1,6 +1,6 @@
 # Image Generation Queue — Client Contract v2
 
-**Status:** proposed, not yet implemented
+**Status:** implemented in the worker (azure_worker, 2026-10-07); NomadImage client migration pending
 **Date:** 2026-10-06
 **Supersedes:** §5 and §6 of `azure_worker/SPEC.md`
 **Audience:** whoever owns the NomadImage client
@@ -202,7 +202,7 @@ the structured fields instead — but then only that client benefits.
 
 Not from configuration. The worker builds the ComfyUI graph, then reads the
 sampler settings **back out of the built graph** before executing it
-(`workflow.py: summarize_workflow`). A value in `render` is a value that was
+(`workflow.py: render_report`). A value in `render` is a value that was
 wired into the node that ran. It cannot drift from a config label, because no
 config label is consulted on the way out.
 
@@ -425,8 +425,9 @@ are the guaranteed set.
 Not client concerns, listed so the two sides stay in step:
 
 - `azure_worker/profiles.toml` is new; `tomllib` is stdlib on Python 3.13.
-- `summarize_workflow()` changes from returning a string to returning the
-  `render` dict; the existing log line formats that dict.
+- The workflow-summary function was renamed `render_report()` and now
+  returns the `render` dict instead of a string; the existing log line
+  formats that dict.
 - The per-profile sampler constants in `workflow.py` (`CHROMA_*`,
   `QWEN_IMAGE_*`, `QWEN21_CFG/SAMPLER/SCHEDULER`, `QWEN_RAPID_*`, `SDXL_*`)
   move into `profiles.toml` and are deleted from code.
