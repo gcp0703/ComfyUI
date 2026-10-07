@@ -1,0 +1,85 @@
+# Per-profile render settings. The worker owns these; job messages no longer
+# carry steps/cfg/width/height. Every value here is reported back on the
+# result message's `render` block, read out of the executed graph.
+#
+# Model *filenames* stay in .env — those are "what's on this machine".
+# This file is "how this model wants to be run", and ships with the repo.
+#
+# Keys: width, height (pixels, multiples of 16, 64-4096), steps (1-200),
+# cfg (0-30, omit when the profile has no guidance node), sampler,
+# scheduler (omit when the sampler node supplies its own curve),
+# shift (sigma shift for ModelSamplingAuraFlow; omit when derived or absent).
+
+[flux1-dev]
+width = 1024
+height = 1024
+steps = 20
+cfg = 1.0                      # guidance-distilled, baked
+sampler = "euler"
+scheduler = "simple"
+
+[flux2-klein]
+width = 1024
+height = 1024
+steps = 20
+# no cfg — BasicGuider has no guidance node at all
+sampler = "euler"              # Flux2Scheduler supplies the sigma curve
+
+[chroma1]
+width = 1024
+height = 1024
+steps = 26
+cfg = 3.5                      # de-distilled: real CFG, real negative
+sampler = "euler"
+scheduler = "beta"
+shift = 1.0
+
+[fluxed-up]
+width = 1024
+height = 1024
+steps = 20
+cfg = 1.0                      # same distilled driving as flux1-dev
+sampler = "euler"
+scheduler = "simple"
+
+[qwen-image-2512]
+width = 1328
+height = 1328
+steps = 20
+cfg = 4.0
+sampler = "euler"
+scheduler = "simple"
+shift = 3.1
+
+["qwen-image-2.1"]
+width = 2048
+height = 2048
+steps = 45
+cfg = 1.0
+sampler = "euler"
+scheduler = "simple"
+# shift intentionally absent — derived per-size by workflow.qwen21_shift()
+
+[openflux1]
+width = 1024
+height = 1024
+steps = 20
+cfg = 3.5                      # de-distilled schnell
+sampler = "euler"
+scheduler = "simple"
+
+[qwen-rapid-aio]
+width = 1024
+height = 1024
+steps = 4
+cfg = 1.0
+sampler = "euler_ancestral"
+scheduler = "beta"
+
+[sdxl-dreamshaper]
+width = 1024
+height = 1024
+steps = 6
+cfg = 2.0
+sampler = "dpmpp_sde"
+scheduler = "karras"
