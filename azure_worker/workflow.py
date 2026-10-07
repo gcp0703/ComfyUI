@@ -20,25 +20,22 @@ Nine profiles are supported, selected at startup via `COMFY_PROFILE`:
 - ``qwen-image-2512`` — Alibaba Qwen-Image (December 2025 release). UNETLoader
   fp8 + CLIPLoader(type=qwen_image) with Qwen 2.5 VL 7B + its own VAE,
   ``ModelSamplingAuraFlow`` (sigma shift 3.1), stock KSampler (euler/simple).
-  Like chroma1, honors ``req.cfg`` and ``req.negative_prompt``.
 - ``qwen-image-2.1`` — Alibaba Qwen-Image 2.1 (September 2026). Separately
   loaded int8 convrot DiT + Qwen3-VL 8B text encoder + RGBA VAE (64-channel
   latent), prompted through ``TextEncodeQwenImage21`` (which emits both
   conditioning branches). The DiT's own sigma shift is pinned to its
-  1024x1024 value at load, so the worker re-derives it per request from
+  1024x1024 value at load, so the worker re-derives it from the profile's
   ``width``/``height`` (the released dynamic-shift scheduler) and patches it
   in with ``ModelSamplingAuraFlow``.
 - ``openflux1`` — ostris/OpenFLUX.1, a de-distilled Flux 1 schnell. Same Flux 1
   architecture as flux1-dev (reuses CLIP-L + T5-XXL + ae.safetensors VAE) but
-  loads the OpenFLUX UNet in fp8 mode and drives KSampler with real ``req.cfg``
-  + a real second ``CLIPTextEncode`` for ``req.negative_prompt`` instead of
-  ``ConditioningZeroOut``.
+  loads the OpenFLUX UNet in fp8 mode and uses a real second ``CLIPTextEncode``
+  for ``req.negative_prompt`` instead of ``ConditioningZeroOut``.
 - ``qwen-rapid-aio`` — Phr00t/Qwen-Image-Edit-Rapid-AIO, an all-in-one merged
   checkpoint (UNet + CLIP + VAE in one file) loaded with
   ``CheckpointLoaderSimple`` + ``TextEncodeQwenImageEditPlus`` (no images = pure
   text-to-image). A 4-step distilled accelerator merge: cfg=1 +
-  ``ConditioningZeroOut`` with ``euler_ancestral``/``beta``. Like flux1-dev,
-  ``req.cfg`` and ``req.negative_prompt`` are no-ops.
+  ``ConditioningZeroOut`` with ``euler_ancestral``/``beta``.
 - ``sdxl-dreamshaper`` — Lykon DreamShaper XL Turbo v2.1, a plain SDXL 1.0
   checkpoint (CLIP-G/CLIP-L + VAE baked in) loaded with
   ``CheckpointLoaderSimple``, then an ordered stack of ``LoraLoader`` nodes
@@ -46,8 +43,11 @@ Nine profiles are supported, selected at startup via `COMFY_PROFILE`:
   ``CLIPTextEncode`` for both branches, so ``req.negative_prompt`` is honored,
   and ``EmptyLatentImage`` (SDXL's 4-channel latent, not ``EmptySD3LatentImage``).
   Sampling is ``dpmpp_sde``/``karras`` at a baked ``cfg=2`` per the Turbo v2.1
-  model card, so ``req.cfg`` is a no-op; ``req.steps`` is honored (4-8 is the
-  recommended range).
+  model card.
+
+Output size, step count, guidance scale and sampler for every profile come
+from ``profiles.toml`` (``Config.render``); the request supplies only the
+prompts and seed.
 
 A single ``build_workflow(req, cfg)`` dispatcher picks the right builder.
 """
@@ -84,35 +84,8 @@ QWEN_RAPID_SAVE_NODE_ID = "7"
 SDXL_SAVE_NODE_ID = "9"
 
 
-# Chroma sampling defaults baked into the workflow — these are not user-tunable
-# per request because they're tied to the model's training and the official
-# lodestone-rock recipe (Euler + Beta + shift=1.0).
-CHROMA_SAMPLER = "euler"
-CHROMA_SCHEDULER = "beta"
-CHROMA_SHIFT = 1.0
-
-
-# Qwen-Image 2512 sampling defaults (from the official ComfyUI template).
-QWEN_IMAGE_SAMPLER = "euler"
-QWEN_IMAGE_SCHEDULER = "simple"
-QWEN_IMAGE_SHIFT = 3.1
-
-
-# Qwen-Image-Edit Rapid AIO sampling defaults (Phr00t model card, v23):
-# 4-step distilled accelerator merge — run at cfg=1 with euler_ancestral/beta.
-# These are baked in, not user-tunable, because they're tied to the merge.
-QWEN_RAPID_SAMPLER = "euler_ancestral"
-QWEN_RAPID_SCHEDULER = "beta"
-
-
-# Qwen-Image 2.1 sampling defaults. The official template runs a fixed shift
-# because it only ever samples at one resolution; the worker re-derives the
-# shift per request from the real width/height (see qwen21_shift) instead.
-QWEN21_SAMPLER = "euler"
-QWEN21_SCHEDULER = "simple"
-# Official pipeline guidance: cfg stays at 1 and the negative prompt is unused,
-# at ~40-50 steps. A higher cfg is only worth it alongside a real negative.
-QWEN21_CFG = 1.0
+# Qwen-Image 2.1 sampling defaults (steps/cfg/sampler) live in profiles.toml;
+# the sigma shift is the one value derived here, per output size.
 # TextEncodeQwenImage21 takes `resolution` as a required input (the v3 schema
 # does not fall back to the declared default for API prompts). It only sizes
 # *reference images*, so for pure text-to-image it is inert — this just matches
@@ -150,16 +123,6 @@ def qwen21_shift(width: int, height: int) -> float:
     return math.exp(mu)
 
 
-# DreamShaper XL Turbo v2.1 sampling defaults (Lykon's model card): DPM++ SDE
-# Karras at cfg=2 with 4-8 steps. cfg is baked rather than taken from
-# ``req.cfg`` because this is a turbo/accelerator merge — the ImageRequest
-# default of 7.0 would blow the output out. Unlike the guidance-distilled Flux
-# profiles, a real negative prompt still works at this cfg, so the negative
-# branch is a genuine CLIPTextEncode rather than ConditioningZeroOut.
-SDXL_SAMPLER = "dpmpp_sde"
-SDXL_SCHEDULER = "karras"
-SDXL_CFG = 2.0
-
 # First node id for the generated LoRA chain. Kept clear of the fixed core
 # node ids ("1".."6", "9") so the stack can grow without colliding.
 SDXL_LORA_NODE_BASE = 20
@@ -175,8 +138,8 @@ _STEPS_CLASSES = ("BasicScheduler", "Flux2Scheduler")
 def effective_cfg(workflow: dict) -> float | None:
     """The guidance scale a built graph will actually sample at, if it states one.
 
-    Not the same as ``req.cfg``: the distilled and turbo profiles bake their own
-    value and ignore the request's.
+    Not the same as the request's cfg: every profile's value comes from
+    ``cfg.render.cfg`` (``profiles.toml``), not the job message.
     """
     for node in workflow.values():
         inputs = node.get("inputs", {})
@@ -315,8 +278,8 @@ def build_flux1_dev_workflow(req: ImageRequest, cfg: Config) -> dict:
         "6": {
             "class_type": "EmptySD3LatentImage",
             "inputs": {
-                "width": req.width,
-                "height": req.height,
+                "width": cfg.render.width,
+                "height": cfg.render.height,
                 "batch_size": 1,
             },
         },
@@ -324,10 +287,10 @@ def build_flux1_dev_workflow(req: ImageRequest, cfg: Config) -> dict:
             "class_type": "KSampler",
             "inputs": {
                 "seed": req.seed,
-                "steps": req.steps,
-                "cfg": 1,
-                "sampler_name": "euler",
-                "scheduler": "simple",
+                "steps": cfg.render.steps,
+                "cfg": cfg.render.cfg,
+                "sampler_name": cfg.render.sampler,
+                "scheduler": cfg.render.scheduler,
                 "denoise": 1,
                 "model": ["1", 0],
                 "positive": ["4", 0],
@@ -375,22 +338,22 @@ def build_flux2_klein_workflow(req: ImageRequest, cfg: Config) -> dict:
         "5": {
             "class_type": "EmptyFlux2LatentImage",
             "inputs": {
-                "width": req.width,
-                "height": req.height,
+                "width": cfg.render.width,
+                "height": cfg.render.height,
                 "batch_size": 1,
             },
         },
         "6": {
             "class_type": "Flux2Scheduler",
             "inputs": {
-                "steps": req.steps,
-                "width": req.width,
-                "height": req.height,
+                "steps": cfg.render.steps,
+                "width": cfg.render.width,
+                "height": cfg.render.height,
             },
         },
         "7": {
             "class_type": "KSamplerSelect",
-            "inputs": {"sampler_name": "euler"},
+            "inputs": {"sampler_name": cfg.render.sampler},
         },
         "8": {
             "class_type": "RandomNoise",
@@ -427,12 +390,12 @@ def build_chroma1_workflow(req: ImageRequest, cfg: Config) -> dict:
     Chroma is a de-distilled Flux derivative — it uses the Flux 1 VAE and a
     16-channel latent (``EmptySD3LatentImage``), a T5-only CLIP path
     (``CLIPLoader`` ``type=chroma``), and crucially the Beta noise schedule
-    that the model was trained against. Sigma shift is patched to 1.0 via
-    ``ModelSamplingAuraFlow`` (the "Flow Shift" node).
+    that the model was trained against. Sigma shift is patched to the
+    profile's value via ``ModelSamplingAuraFlow`` (the "Flow Shift" node).
 
     Unlike the Flux profiles, Chroma supports real CFG and a real negative
-    prompt — ``req.cfg`` flows into ``CFGGuider`` and ``req.negative_prompt``
-    is encoded by a second ``CLIPTextEncode``.
+    prompt — the profile's cfg flows into ``CFGGuider`` and
+    ``req.negative_prompt`` is encoded by a second ``CLIPTextEncode``.
     """
     filename_prefix = sanitize_name(req.name)
     return {
@@ -450,7 +413,7 @@ def build_chroma1_workflow(req: ImageRequest, cfg: Config) -> dict:
         },
         "4": {
             "class_type": "ModelSamplingAuraFlow",
-            "inputs": {"model": ["1", 0], "shift": CHROMA_SHIFT},
+            "inputs": {"model": ["1", 0], "shift": cfg.render.shift},
         },
         "5": {
             "class_type": "T5TokenizerOptions",
@@ -470,19 +433,19 @@ def build_chroma1_workflow(req: ImageRequest, cfg: Config) -> dict:
                 "model": ["4", 0],
                 "positive": ["6", 0],
                 "negative": ["7", 0],
-                "cfg": req.cfg,
+                "cfg": cfg.render.cfg,
             },
         },
         "9": {
             "class_type": "KSamplerSelect",
-            "inputs": {"sampler_name": CHROMA_SAMPLER},
+            "inputs": {"sampler_name": cfg.render.sampler},
         },
         "10": {
             "class_type": "BasicScheduler",
             "inputs": {
                 "model": ["4", 0],
-                "scheduler": CHROMA_SCHEDULER,
-                "steps": req.steps,
+                "scheduler": cfg.render.scheduler,
+                "steps": cfg.render.steps,
                 "denoise": 1.0,
             },
         },
@@ -493,8 +456,8 @@ def build_chroma1_workflow(req: ImageRequest, cfg: Config) -> dict:
         "12": {
             "class_type": "EmptySD3LatentImage",
             "inputs": {
-                "width": req.width,
-                "height": req.height,
+                "width": cfg.render.width,
+                "height": cfg.render.height,
                 "batch_size": 1,
             },
         },
@@ -564,8 +527,8 @@ def build_fluxed_up_workflow(req: ImageRequest, cfg: Config) -> dict:
         "6": {
             "class_type": "EmptySD3LatentImage",
             "inputs": {
-                "width": req.width,
-                "height": req.height,
+                "width": cfg.render.width,
+                "height": cfg.render.height,
                 "batch_size": 1,
             },
         },
@@ -573,10 +536,10 @@ def build_fluxed_up_workflow(req: ImageRequest, cfg: Config) -> dict:
             "class_type": "KSampler",
             "inputs": {
                 "seed": req.seed,
-                "steps": req.steps,
-                "cfg": 1,
-                "sampler_name": "euler",
-                "scheduler": "simple",
+                "steps": cfg.render.steps,
+                "cfg": cfg.render.cfg,
+                "sampler_name": cfg.render.sampler,
+                "scheduler": cfg.render.scheduler,
                 "denoise": 1,
                 "model": ["1", 0],
                 "positive": ["4", 0],
@@ -605,9 +568,10 @@ def build_qwen_image_2512_workflow(req: ImageRequest, cfg: Config) -> dict:
     ``KSampler`` with ``euler`` + ``simple`` — no custom sampler chain needed.
 
     Like Chroma1, Qwen-Image supports real CFG and a real negative prompt:
-    ``req.cfg`` flows into KSampler and ``req.negative_prompt`` is encoded by a
-    second ``CLIPTextEncode``. The official recipe recommends ~20-50 steps at
-    cfg=4.0 for the base 2512 model (without the 2-step Turbo LoRA).
+    the profile's cfg flows into KSampler and ``req.negative_prompt`` is
+    encoded by a second ``CLIPTextEncode``. The official recipe recommends
+    ~20-50 steps at cfg=4.0 for the base 2512 model (without the 2-step
+    Turbo LoRA) — profiles.toml ships both defaults.
     """
     filename_prefix = sanitize_name(req.name)
     return {
@@ -625,7 +589,7 @@ def build_qwen_image_2512_workflow(req: ImageRequest, cfg: Config) -> dict:
         },
         "4": {
             "class_type": "ModelSamplingAuraFlow",
-            "inputs": {"model": ["1", 0], "shift": QWEN_IMAGE_SHIFT},
+            "inputs": {"model": ["1", 0], "shift": cfg.render.shift},
         },
         "5": {
             "class_type": "CLIPTextEncode",
@@ -638,8 +602,8 @@ def build_qwen_image_2512_workflow(req: ImageRequest, cfg: Config) -> dict:
         "7": {
             "class_type": "EmptySD3LatentImage",
             "inputs": {
-                "width": req.width,
-                "height": req.height,
+                "width": cfg.render.width,
+                "height": cfg.render.height,
                 "batch_size": 1,
             },
         },
@@ -647,10 +611,10 @@ def build_qwen_image_2512_workflow(req: ImageRequest, cfg: Config) -> dict:
             "class_type": "KSampler",
             "inputs": {
                 "seed": req.seed,
-                "steps": req.steps,
-                "cfg": req.cfg,
-                "sampler_name": QWEN_IMAGE_SAMPLER,
-                "scheduler": QWEN_IMAGE_SCHEDULER,
+                "steps": cfg.render.steps,
+                "cfg": cfg.render.cfg,
+                "sampler_name": cfg.render.sampler,
+                "scheduler": cfg.render.scheduler,
                 "denoise": 1,
                 "model": ["4", 0],
                 "positive": ["5", 0],
@@ -684,13 +648,9 @@ def build_qwen_image_2_1_workflow(req: ImageRequest, cfg: Config) -> dict:
       images and stay unwired for text-to-image.
     - ``ModelSamplingAuraFlow`` carries the sigma shift. The released scheduler
       is dynamic (``use_dynamic_shifting``), so unlike the 2512 builder's fixed
-      3.1, the shift is computed per request from ``req.width``/``req.height``
-      — see :func:`qwen21_shift`. ComfyUI's own ``sampling_settings`` for this
-      model pin the 1024x1024 value for every resolution.
-
-    The official recipe drives ``cfg=1`` with no negative prompt, so like
-    ``flux1-dev`` those two request fields are no-ops here; ``req.steps`` is
-    honored (the template starts at 25, the pipeline recommends 40-50).
+      3.1, the shift is computed from the profile's ``cfg.render.width``/
+      ``height`` — see :func:`qwen21_shift`. ComfyUI's own ``sampling_settings``
+      for this model pin the 1024x1024 value for every resolution.
     """
     filename_prefix = sanitize_name(req.name)
     return {
@@ -710,7 +670,7 @@ def build_qwen_image_2_1_workflow(req: ImageRequest, cfg: Config) -> dict:
             "class_type": "ModelSamplingAuraFlow",
             "inputs": {
                 "model": ["1", 0],
-                "shift": qwen21_shift(req.width, req.height),
+                "shift": qwen21_shift(cfg.render.width, cfg.render.height),
             },
         },
         "5": {
@@ -725,8 +685,8 @@ def build_qwen_image_2_1_workflow(req: ImageRequest, cfg: Config) -> dict:
         "6": {
             "class_type": "EmptyLatentImage",
             "inputs": {
-                "width": req.width,
-                "height": req.height,
+                "width": cfg.render.width,
+                "height": cfg.render.height,
                 "batch_size": 1,
             },
         },
@@ -734,10 +694,10 @@ def build_qwen_image_2_1_workflow(req: ImageRequest, cfg: Config) -> dict:
             "class_type": "KSampler",
             "inputs": {
                 "seed": req.seed,
-                "steps": req.steps,
-                "cfg": QWEN21_CFG,
-                "sampler_name": QWEN21_SAMPLER,
-                "scheduler": QWEN21_SCHEDULER,
+                "steps": cfg.render.steps,
+                "cfg": cfg.render.cfg,
+                "sampler_name": cfg.render.sampler,
+                "scheduler": cfg.render.scheduler,
                 "denoise": 1,
                 "model": ["4", 0],
                 "positive": ["5", 0],
@@ -763,13 +723,14 @@ def build_openflux1_workflow(req: ImageRequest, cfg: Config) -> dict:
     clip_l + T5-XXL, same Flux 1 VAE ``ae.safetensors``) — only the UNet differs
     and is loaded in fp8 mode. Unlike ``flux1-dev`` / ``fluxed-up``, the
     distillation has been trained out, so the workflow uses **real CFG and a
-    real negative prompt**: ``req.cfg`` flows into KSampler and
+    real negative prompt**: the profile's cfg flows into KSampler and
     ``req.negative_prompt`` is encoded by a second ``CLIPTextEncode`` (no
     ``ConditioningZeroOut``).
 
     Reuses ``cfg.flux1_clip_l`` / ``cfg.flux1_t5`` / ``cfg.flux1_vae`` since
     those files are byte-identical for any Flux 1 derivative. Recommended
-    request params per the ostris model card: ``cfg≈3.5``, ``steps=20`` and up.
+    settings per the ostris model card: ``cfg≈3.5``, ``steps=20`` and up —
+    profiles.toml ships both.
     """
     filename_prefix = sanitize_name(req.name)
     return {
@@ -800,8 +761,8 @@ def build_openflux1_workflow(req: ImageRequest, cfg: Config) -> dict:
         "6": {
             "class_type": "EmptySD3LatentImage",
             "inputs": {
-                "width": req.width,
-                "height": req.height,
+                "width": cfg.render.width,
+                "height": cfg.render.height,
                 "batch_size": 1,
             },
         },
@@ -809,10 +770,10 @@ def build_openflux1_workflow(req: ImageRequest, cfg: Config) -> dict:
             "class_type": "KSampler",
             "inputs": {
                 "seed": req.seed,
-                "steps": req.steps,
-                "cfg": req.cfg,
-                "sampler_name": "euler",
-                "scheduler": "simple",
+                "steps": cfg.render.steps,
+                "cfg": cfg.render.cfg,
+                "sampler_name": cfg.render.sampler,
+                "scheduler": cfg.render.scheduler,
                 "denoise": 1,
                 "model": ["1", 0],
                 "positive": ["4", 0],
@@ -841,10 +802,10 @@ def build_qwen_rapid_aio_workflow(req: ImageRequest, cfg: Config) -> dict:
     "provide no images to just do pure text to image."
 
     It is a 4-step distilled accelerator merge driven at ``cfg=1`` with
-    ``euler_ancestral``/``beta`` (the v23 recommendation). Like ``flux1-dev`` and
-    ``fluxed-up`` it is guidance-distilled, so ``req.cfg`` and ``req.negative_prompt``
-    are no-ops — the negative branch is a ``ConditioningZeroOut`` placeholder.
-    Recommended ``req.steps`` is 4 (4-8 works).
+    ``euler_ancestral``/``beta`` (the v23 recommendation, baked into
+    profiles.toml). Like ``flux1-dev`` and ``fluxed-up`` it is
+    guidance-distilled, so ``req.negative_prompt`` is a no-op — the negative
+    branch is a ``ConditioningZeroOut`` placeholder.
 
     The ``NSFW-v23`` build merges the NSFW LoRAs directly into the weights, so no
     trigger keyword is required; the SFW build is the same graph with a different
@@ -867,8 +828,8 @@ def build_qwen_rapid_aio_workflow(req: ImageRequest, cfg: Config) -> dict:
         "4": {
             "class_type": "EmptySD3LatentImage",
             "inputs": {
-                "width": req.width,
-                "height": req.height,
+                "width": cfg.render.width,
+                "height": cfg.render.height,
                 "batch_size": 1,
             },
         },
@@ -876,10 +837,10 @@ def build_qwen_rapid_aio_workflow(req: ImageRequest, cfg: Config) -> dict:
             "class_type": "KSampler",
             "inputs": {
                 "seed": req.seed,
-                "steps": req.steps,
-                "cfg": 1,
-                "sampler_name": QWEN_RAPID_SAMPLER,
-                "scheduler": QWEN_RAPID_SCHEDULER,
+                "steps": cfg.render.steps,
+                "cfg": cfg.render.cfg,
+                "sampler_name": cfg.render.sampler,
+                "scheduler": cfg.render.scheduler,
                 "denoise": 1,
                 "model": ["1", 0],
                 "positive": ["2", 0],
@@ -908,9 +869,8 @@ def build_sdxl_dreamshaper_workflow(req: ImageRequest, cfg: Config) -> dict:
     checkpoint feeds the text encoders directly.
 
     Sampling follows the Turbo v2.1 model card (``dpmpp_sde``/``karras``,
-    ``cfg=2``); see ``SDXL_CFG`` for why ``req.cfg`` is not used. Both prompt
-    branches are real ``CLIPTextEncode`` nodes, so ``req.negative_prompt``
-    takes effect.
+    ``cfg=2``), baked into ``profiles.toml``. Both prompt branches are real
+    ``CLIPTextEncode`` nodes, so ``req.negative_prompt`` takes effect.
     """
     filename_prefix = sanitize_name(req.name)
     workflow: dict = {
@@ -961,8 +921,8 @@ def build_sdxl_dreamshaper_workflow(req: ImageRequest, cfg: Config) -> dict:
             "4": {
                 "class_type": "EmptyLatentImage",
                 "inputs": {
-                    "width": req.width,
-                    "height": req.height,
+                    "width": cfg.render.width,
+                    "height": cfg.render.height,
                     "batch_size": 1,
                 },
             },
@@ -970,10 +930,10 @@ def build_sdxl_dreamshaper_workflow(req: ImageRequest, cfg: Config) -> dict:
                 "class_type": "KSampler",
                 "inputs": {
                     "seed": req.seed,
-                    "steps": req.steps,
-                    "cfg": SDXL_CFG,
-                    "sampler_name": SDXL_SAMPLER,
-                    "scheduler": SDXL_SCHEDULER,
+                    "steps": cfg.render.steps,
+                    "cfg": cfg.render.cfg,
+                    "sampler_name": cfg.render.sampler,
+                    "scheduler": cfg.render.scheduler,
                     "denoise": 1,
                     "model": [source, 0],
                     "positive": ["2", 0],

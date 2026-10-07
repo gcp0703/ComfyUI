@@ -37,11 +37,8 @@ from azure_worker.workflow import (
     QWEN_IMAGE_SAVE_NODE_ID,
     QWEN21_SAVE_NODE_ID,
     QWEN_RAPID_SAVE_NODE_ID,
-    SDXL_CFG,
     SDXL_LORA_NODE_BASE,
-    SDXL_SAMPLER,
     SDXL_SAVE_NODE_ID,
-    SDXL_SCHEDULER,
     build_chroma1_workflow,
     build_flux1_dev_workflow,
     build_flux2_klein_workflow,
@@ -71,6 +68,35 @@ def _sample_payload(**overrides):
     return json.dumps(payload)
 
 
+# -- Builders take size/steps/cfg/sampler from Config.render, not the request --
+
+@pytest.mark.parametrize(
+    "profile",
+    [
+        PROFILE_FLUX1_DEV, PROFILE_FLUX2_KLEIN, PROFILE_CHROMA1, PROFILE_FLUXED_UP,
+        PROFILE_QWEN_IMAGE_2512, PROFILE_QWEN_IMAGE_2_1, PROFILE_OPENFLUX1,
+        PROFILE_QWEN_RAPID_AIO, PROFILE_SDXL_DREAMSHAPER,
+    ],
+)
+def test_builders_ignore_request_size_and_steps(profile):
+    """Whatever a legacy client sends, the graph is sized and stepped from profiles.toml."""
+    cfg = _cfg(profile)
+    req = ImageRequest.from_json(_sample_payload(width=512, height=512, steps=99, cfg=9.0))
+    wf = build_workflow(req, cfg)
+
+    latents = [n for n in wf.values() if n["class_type"].startswith("Empty") and n["class_type"].endswith("LatentImage")]
+    assert len(latents) == 1, f"{profile}: expected one latent node"
+    assert latents[0]["inputs"]["width"] == cfg.render.width
+    assert latents[0]["inputs"]["height"] == cfg.render.height
+
+    steps = [
+        n["inputs"]["steps"] for n in wf.values()
+        if n["class_type"] in ("KSampler", "BasicScheduler", "Flux2Scheduler")
+    ]
+    assert steps == [cfg.render.steps], f"{profile}: steps {steps!r}"
+    assert effective_cfg(wf) == cfg.render.cfg
+
+
 # -- Message validation --
 
 def test_request_round_trip_defaults():
@@ -94,6 +120,9 @@ def test_request_rejects_missing_prompt():
 # -- Flux 1 dev workflow --
 
 def test_flux1_workflow_shape():
+    # width/height are deliberately mismatched from the profile's render
+    # settings here, to prove the builder ignores the request and uses
+    # cfg.render instead (see test_builders_ignore_request_size_and_steps).
     req = ImageRequest.from_json(_sample_payload(prompt="dragon", seed=99, width=1024, height=768))
     wf = build_flux1_dev_workflow(req, _cfg(PROFILE_FLUX1_DEV))
 
@@ -110,7 +139,7 @@ def test_flux1_workflow_shape():
     assert wf["4"]["inputs"]["text"] == "dragon"
     assert wf["5"]["class_type"] == "ConditioningZeroOut"
     assert wf["6"]["class_type"] == "EmptySD3LatentImage"
-    assert wf["6"]["inputs"]["width"] == 1024 and wf["6"]["inputs"]["height"] == 768
+    assert wf["6"]["inputs"]["width"] == 1024 and wf["6"]["inputs"]["height"] == 1024
 
     ks = wf["7"]
     assert ks["class_type"] == "KSampler"
@@ -156,8 +185,6 @@ def test_chroma1_workflow_shape():
         seed=99,
         width=1024,
         height=1024,
-        steps=26,
-        cfg=3.5,
     ))
     wf = build_chroma1_workflow(req, _cfg(PROFILE_CHROMA1))
 
@@ -264,8 +291,6 @@ def test_qwen_image_2512_workflow_shape():
         seed=99,
         width=1328,
         height=1328,
-        steps=30,
-        cfg=4.0,
     ))
     wf = build_qwen_image_2512_workflow(req, _cfg(PROFILE_QWEN_IMAGE_2512))
 
@@ -293,7 +318,7 @@ def test_qwen_image_2512_workflow_shape():
     ks = wf["8"]
     assert ks["class_type"] == "KSampler"
     assert ks["inputs"]["seed"] == 99
-    assert ks["inputs"]["steps"] == 30
+    assert ks["inputs"]["steps"] == 20
     assert ks["inputs"]["cfg"] == 4.0
     assert ks["inputs"]["sampler_name"] == "euler"
     assert ks["inputs"]["scheduler"] == "simple"
@@ -319,8 +344,6 @@ def test_qwen_image_2_1_workflow_shape():
         seed=99,
         width=1024,
         height=1024,
-        steps=40,
-        cfg=7.0,
     ))
     wf = build_qwen_image_2_1_workflow(req, _cfg(PROFILE_QWEN_IMAGE_2_1))
 
@@ -336,11 +359,12 @@ def test_qwen_image_2_1_workflow_shape():
     assert wf["3"]["inputs"]["vae_name"] == "qwen_image_2.1_vae_bf16.safetensors"
 
     # Dynamic shift: the model's own settings pin the 1024x1024 mu (0.69), so
-    # the builder patches exp(mu) in per request. At 1024x1024 that's e^0.6935.
+    # the builder patches exp(mu) in from the profile's size. This profile's
+    # default is 2048x2048, which is e^1.3129.
     shifter = wf["4"]
     assert shifter["class_type"] == "ModelSamplingAuraFlow"
     assert shifter["inputs"]["model"] == ["1", 0]
-    assert shifter["inputs"]["shift"] == pytest.approx(math.exp(0.6935483870967742), rel=1e-6)
+    assert shifter["inputs"]["shift"] == pytest.approx(math.exp(1.3129032258064517), rel=1e-6)
 
     # One encoder node emits both conditioning branches
     enc = wf["5"]
@@ -352,15 +376,15 @@ def test_qwen_image_2_1_workflow_shape():
     assert enc["inputs"]["resolution"] == 1024
 
     assert wf["6"]["class_type"] == "EmptyLatentImage"
-    assert wf["6"]["inputs"]["width"] == 1024 and wf["6"]["inputs"]["height"] == 1024
+    assert wf["6"]["inputs"]["width"] == 2048 and wf["6"]["inputs"]["height"] == 2048
 
     ks = wf["7"]
     assert ks["class_type"] == "KSampler"
     assert ks["inputs"]["seed"] == 99
-    assert ks["inputs"]["steps"] == 40
+    assert ks["inputs"]["steps"] == 45
     assert ks["inputs"]["sampler_name"] == "euler"
     assert ks["inputs"]["scheduler"] == "simple"
-    # Official path runs at cfg=1, so a request cfg of 7.0 is ignored
+    # cfg comes from profiles.toml (1.0 on the official path)
     assert ks["inputs"]["cfg"] == 1
     # Sampling off the shift-patched model, not the raw loader
     assert ks["inputs"]["model"] == ["4", 0]
@@ -373,12 +397,20 @@ def test_qwen_image_2_1_workflow_shape():
 
 
 def test_qwen_image_2_1_shift_grows_with_resolution():
-    """2K needs a markedly larger mu than 1K, per the released dynamic-shift config."""
-    req = ImageRequest.from_json(_sample_payload(width=2048, height=2048))
-    wf = build_qwen_image_2_1_workflow(req, _cfg(PROFILE_QWEN_IMAGE_2_1))
+    from dataclasses import replace
+    from azure_worker.workflow import qwen21_shift
 
-    # calculate_shift(16384) = 1.3129...
-    assert wf["4"]["inputs"]["shift"] == pytest.approx(math.exp(1.3129032258064517), rel=1e-6)
+    base = _cfg(PROFILE_QWEN_IMAGE_2_1)
+    small = replace(base, render=replace(base.render, width=1024, height=1024))
+    large = replace(base, render=replace(base.render, width=2048, height=2048))
+    req = ImageRequest.from_json(_sample_payload())
+
+    shift_small = build_workflow(req, small)["4"]["inputs"]["shift"]
+    shift_large = build_workflow(req, large)["4"]["inputs"]["shift"]
+    assert shift_small == pytest.approx(qwen21_shift(1024, 1024))
+    assert shift_large == pytest.approx(qwen21_shift(2048, 2048))
+    assert shift_large > shift_small
+    assert shift_large == pytest.approx(3.7169, abs=1e-3)
 
 
 def test_dispatcher_picks_qwen_image_2_1_profile():
@@ -390,7 +422,7 @@ def test_dispatcher_picks_qwen_image_2_1_profile():
 
 def test_qwen_image_2_1_cfg_is_reported_as_baked():
     """The worker logs the ignored-cfg notice off this, so it must read back 1.0."""
-    req = ImageRequest.from_json(_sample_payload(cfg=7.0))
+    req = ImageRequest.from_json(_sample_payload())
     wf = build_workflow(req, _cfg(PROFILE_QWEN_IMAGE_2_1))
     assert effective_cfg(wf) == 1.0
     assert "cfg=1.0" in summarize_workflow(wf)
@@ -398,14 +430,15 @@ def test_qwen_image_2_1_cfg_is_reported_as_baked():
 
 def test_qwen_image_2_1_shift_is_reported_per_resolution():
     """The dynamic shift is a per-job sampling input, so the log line must show it."""
-    line_1k = summarize_workflow(
-        build_workflow(ImageRequest.from_json(_sample_payload(width=1024, height=1024)),
-                       _cfg(PROFILE_QWEN_IMAGE_2_1))
-    )
-    line_2k = summarize_workflow(
-        build_workflow(ImageRequest.from_json(_sample_payload(width=2048, height=2048)),
-                       _cfg(PROFILE_QWEN_IMAGE_2_1))
-    )
+    from dataclasses import replace
+
+    base = _cfg(PROFILE_QWEN_IMAGE_2_1)
+    small = replace(base, render=replace(base.render, width=1024, height=1024))
+    large = replace(base, render=replace(base.render, width=2048, height=2048))
+    req = ImageRequest.from_json(_sample_payload())
+
+    line_1k = summarize_workflow(build_workflow(req, small))
+    line_2k = summarize_workflow(build_workflow(req, large))
     assert "shift=2.0008" in line_1k
     assert "shift=3.7169" in line_2k
 
@@ -419,8 +452,6 @@ def test_openflux1_workflow_shape():
         seed=99,
         width=1024,
         height=1024,
-        steps=20,
-        cfg=3.5,
     ))
     wf = build_openflux1_workflow(req, _cfg(PROFILE_OPENFLUX1))
 
@@ -473,8 +504,6 @@ def test_qwen_rapid_aio_workflow_shape():
         seed=99,
         width=1024,
         height=1024,
-        steps=4,
-        cfg=8.0,  # ignored
     ))
     wf = build_qwen_rapid_aio_workflow(req, _cfg(PROFILE_QWEN_RAPID_AIO))
 
@@ -550,7 +579,7 @@ _EARS = LoraSpec("dnd/Elf_Ears_XL.safetensors", 0.6, 0.4)
 
 
 def test_sdxl_dreamshaper_workflow_shape_without_loras():
-    req = ImageRequest.from_json(_sample_payload(steps=6, negative_prompt="blurry"))
+    req = ImageRequest.from_json(_sample_payload(negative_prompt="blurry"))
     wf = build_sdxl_dreamshaper_workflow(req, _cfg(PROFILE_SDXL_DREAMSHAPER))
 
     assert wf["1"]["class_type"] == "CheckpointLoaderSimple"
@@ -575,9 +604,9 @@ def test_sdxl_dreamshaper_workflow_shape_without_loras():
 
     sampler = wf["5"]["inputs"]
     assert wf["5"]["class_type"] == "KSampler"
-    assert sampler["sampler_name"] == SDXL_SAMPLER == "dpmpp_sde"
-    assert sampler["scheduler"] == SDXL_SCHEDULER == "karras"
-    assert sampler["cfg"] == SDXL_CFG == 2.0
+    assert sampler["sampler_name"] == "dpmpp_sde"
+    assert sampler["scheduler"] == "karras"
+    assert sampler["cfg"] == 2.0
     assert sampler["steps"] == 6
     assert sampler["seed"] == 7
 
@@ -709,15 +738,14 @@ def test_summarize_workflow_says_none_when_no_loras():
     ],
 )
 def test_effective_cfg_reports_the_baked_value(profile, expected_cfg):
-    # Request asks for 7.0; these profiles all override it.
+    # Request cfg is ignored entirely; the value comes from profiles.toml.
     req = ImageRequest.from_json(_sample_payload(cfg=7.0))
-    assert req.cfg == 7.0
     assert effective_cfg(build_workflow(req, _cfg(profile))) == expected_cfg
 
 
 def test_effective_cfg_reports_honored_value_for_real_cfg_profiles():
-    req = ImageRequest.from_json(_sample_payload(cfg=4.5))
-    assert effective_cfg(build_workflow(req, _cfg(PROFILE_OPENFLUX1))) == 4.5
+    req = ImageRequest.from_json(_sample_payload())
+    assert effective_cfg(build_workflow(req, _cfg(PROFILE_OPENFLUX1))) == 3.5
 
 
 @pytest.mark.parametrize(
@@ -741,5 +769,5 @@ def test_summarize_workflow_covers_every_profile(profile):
 
     assert "model=" in line
     assert "loras=" in line
-    assert "steps=6" in line, f"{profile} did not report steps: {line!r}"
+    assert f"steps={_cfg(profile).render.steps}" in line, f"{profile} did not report steps: {line!r}"
     assert "sampler=" in line, f"{profile} did not report a sampler: {line!r}"
