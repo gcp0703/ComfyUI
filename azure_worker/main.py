@@ -96,14 +96,25 @@ def _process_one(runner: ComfyRunner, clients: azure_io.AzureClients) -> bool:
 
     raw_body = azure_io.message_body_text(msg)
     req: Optional[ImageRequest] = None
+    # Filled in once a graph exists, so a runtime failure can still report
+    # what was being attempted (contract v2 §4: render is populated on
+    # runtime errors, null on validation errors).
+    render: Optional[dict] = None
+    width = height = 0
     try:
         req = ImageRequest.from_json(raw_body)
-        log.info("job %s name=%s %dx%d", req.job_id, req.name, req.width, req.height)
+        log.info("job %s name=%s", req.job_id, req.name)
         log.info("job %s prompt: %s", req.job_id, req.prompt)
         if req.negative_prompt:
             log.info("job %s negative_prompt: %s", req.job_id, req.negative_prompt)
+        if req.ignored_fields:
+            log.warning(
+                "job %s sent contract-v1 fields the worker now owns, ignoring: %s",
+                req.job_id, ", ".join(req.ignored_fields),
+            )
         workflow = build_workflow(req, clients.config)
         render = render_report(workflow, clients.config.profile)
+        width, height = workflow_dimensions(workflow)
         log.info("job %s render: %s", req.job_id, render["summary"])
         outputs = runner.run(workflow, prompt_id=req.job_id)
         if not outputs:
@@ -111,14 +122,20 @@ def _process_one(runner: ComfyRunner, clients: azure_io.AzureClients) -> bool:
         local_path: Path = outputs[0]
         blob_name = f"{sanitize_name(req.name)}/{local_path.name}"
         sas_url = azure_io.upload_image(clients, local_path, blob_name)
-        azure_io.send_result(clients, ImageResult.success(req, blob_name, sas_url))
+        azure_io.send_result(
+            clients,
+            ImageResult.success(req, blob_name, sas_url, width=width, height=height, render=render),
+        )
         log.info("job %s complete: %s", req.job_id, blob_name)
     except MessageValidationError as e:
         log.warning("invalid message (dequeue_count=%s): %s", msg.dequeue_count, e)
         azure_io.send_result(clients, ImageResult.error_for(None, str(e)))
     except (ComfyJobError, Exception) as e:  # noqa: BLE001 - we want every failure on the result queue
         log.exception("job failed: %s", e)
-        azure_io.send_result(clients, ImageResult.error_for(req, str(e)))
+        azure_io.send_result(
+            clients,
+            ImageResult.error_for(req, str(e), width=width, height=height, render=render),
+        )
     finally:
         # Always delete: result queue carries the success/error signal.
         # Switch to a dequeue_count check + leave-for-retry once we have a retry policy.
@@ -179,7 +196,11 @@ def main() -> int:
         print(f"config error: {e}", file=sys.stderr)
         return 2
 
-    log.info("starting ComfyUI runner (profile=%s)", cfg.profile)
+    r = cfg.render
+    log.info(
+        "starting ComfyUI runner (profile=%s) render: %dx%d steps=%d cfg=%s sampler=%s/%s shift=%s",
+        cfg.profile, r.width, r.height, r.steps, r.cfg, r.sampler, r.scheduler, r.shift,
+    )
     runner = ComfyRunner()
     llm_runner = LlmRunner(cfg.ollama_url, cfg.llm_request_timeout_seconds)
     clients = azure_io.build_clients(cfg)
