@@ -81,6 +81,12 @@ The worker enforces the 32,000-character rule and, as a backstop, the true
 byte limit of the encoded message. Exceeding either produces an `error` result
 with a message naming the limit; it never surfaces as an SDK exception.
 
+The result message is serialized as UTF-8, not `\u`-escaped, and is itself
+guarded against the same transport ceiling: if a result would not fit the
+queue, the worker truncates the `prompt`/`negative_prompt` echo and adds
+`"prompt echo truncated to fit the result message"` to `warnings` rather than
+letting the send fail.
+
 **This is a transport limit, not a quality promise.** The Qwen-Image models
 were trained on long structured captions and tolerate length far better than
 CLIP-based models, but nobody has measured output quality at 30,000
@@ -432,3 +438,8 @@ Not client concerns, listed so the two sides stay in step:
   ≤ 48 KiB). Both reject with a validation error naming the limit.
 - `azure_worker/SPEC.md` §5/§6 and the README profile table get updated to
   match, or replaced by a pointer to this document and to `profiles.toml`.
+- `azure_io.send_result` guards the outbound message against the same 64 KiB
+  (post-base64) ceiling the request is checked against: `ImageResult.to_json`
+  serializes as UTF-8 (`ensure_ascii=False`), and if the result would still
+  exceed `IMAGE_RESULT_MAX_BYTES`, the worker truncates the `prompt` (then
+  `negative_prompt`) echo and sends rather than raising.

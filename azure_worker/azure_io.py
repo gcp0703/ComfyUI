@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -31,6 +31,15 @@ log = logging.getLogger(__name__)
 # is inlined; above it, we spill to Blob Storage and replace the inline text
 # with a SAS URL.
 LLM_RESULT_INLINE_CAP_BYTES = 50_000
+
+# Image results have no blob-spill path for the prompt echo (unlike the LLM
+# pipeline's completion text) — the prompt is small relative to an LLM
+# completion, so instead of spilling we truncate the echo. 48 KiB raw JSON
+# leaves headroom under the 64 KiB post-base64 cap (~48 KiB raw) for base64's
+# ~4/3 expansion plus envelope overhead.
+IMAGE_RESULT_MAX_BYTES = 48 * 1024
+
+_TRUNCATION_WARNING = "prompt echo truncated to fit the result message"
 
 
 @dataclass
@@ -125,8 +134,43 @@ def upload_image(clients: AzureClients, local_path: Path, blob_name: str) -> str
 
 
 def send_result(clients: AzureClients, result: ImageResult) -> None:
+    """Send an image result, truncating the prompt echo if it won't fit the queue.
+
+    Unlike the LLM pipeline, there is no blob to spill the prompt into — it's
+    an echo of what the client already sent, not new content — so instead we
+    shrink it until the message fits, record that in `warnings`, and send.
+    """
+    body = result.to_json().encode("utf-8")
+    if len(body) > IMAGE_RESULT_MAX_BYTES:
+        result, body = _fit_result_to_cap(result)
     # Outbound queue is configured with BinaryBase64EncodePolicy, which expects bytes.
-    clients.outbound.send_message(result.to_json().encode("utf-8"))
+    clients.outbound.send_message(body)
+
+
+def _fit_result_to_cap(result: ImageResult) -> tuple[ImageResult, bytes]:
+    """Shrink `result.prompt` (then `.negative_prompt`) until it fits IMAGE_RESULT_MAX_BYTES.
+
+    Cuts however many characters the current overage implies, plus a small
+    margin, and re-measures: multi-byte characters mean character count and
+    byte count don't shrink 1:1, so a single cut is not guaranteed to be
+    enough. Adds exactly one truncation warning, regardless of how many
+    iterations it takes.
+    """
+    truncated = replace(result, warnings=[*result.warnings, _TRUNCATION_WARNING])
+    body = truncated.to_json().encode("utf-8")
+    while len(body) > IMAGE_RESULT_MAX_BYTES and (truncated.prompt or truncated.negative_prompt):
+        overage = len(body) - IMAGE_RESULT_MAX_BYTES
+        margin = overage + 64
+        if truncated.prompt:
+            cut = min(len(truncated.prompt), margin)
+            truncated = replace(truncated, prompt=truncated.prompt[: len(truncated.prompt) - cut])
+        else:
+            cut = min(len(truncated.negative_prompt), margin)
+            truncated = replace(
+                truncated, negative_prompt=truncated.negative_prompt[: len(truncated.negative_prompt) - cut]
+            )
+        body = truncated.to_json().encode("utf-8")
+    return truncated, body
 
 
 def send_llm_result(clients: AzureClients, result: LlmResult) -> None:

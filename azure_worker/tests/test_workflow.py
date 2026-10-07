@@ -611,6 +611,15 @@ def test_result_runtime_error_keeps_render_and_intended_size():
     assert parsed["blob_url"] is None
 
 
+def test_result_to_json_does_not_escape_non_ascii():
+    """ensure_ascii=False: a \\uXXXX escape would roughly double the byte count."""
+    req = ImageRequest.from_json(_sample_payload(prompt="mountains—sunset"))
+    result = ImageResult.success(req, "x/y.png", "u", width=2048, height=2048, render=_RENDER)
+    raw = result.to_json()
+    assert "—" in raw
+    assert "\\u2014" not in raw
+
+
 def test_sanitize_name_strips_unsafe_chars():
     assert sanitize_name("../weird name!.png") == "weird_name_.png"
     assert sanitize_name("") == "image"

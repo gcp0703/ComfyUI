@@ -186,7 +186,9 @@ whether to look at `blob_url` or `error`.
   when validation failed before a graph was built. Field-by-field definition:
   `docs/superpowers/specs/2026-10-06-image-queue-contract-v2.md` §4.
 - `warnings` is always an array, `[]` when empty. Today it carries
-  `"ignored client-supplied fields: ..."` for clients still sending v1 fields.
+  `"ignored client-supplied fields: ..."` for clients still sending v1 fields,
+  and `"prompt echo truncated to fit the result message"` on the rare result
+  that would otherwise exceed the queue's size cap (see below).
 - `seed` reflects the seed the worker actually used.
 - `blob_url` is a pre-signed read-only HTTPS URL, valid 24 hours. `blob_name`
   is the path within the `generated-images` container.

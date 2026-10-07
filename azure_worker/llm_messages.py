@@ -246,4 +246,7 @@ class LlmResult:
         )
 
     def to_json(self) -> str:
-        return json.dumps(asdict(self))
+        # ensure_ascii=False: see ImageResult.to_json in messages.py — the
+        # \u-escaped form roughly doubles non-ASCII byte count, which would
+        # undermine send_llm_result's own size check against the raw UTF-8.
+        return json.dumps(asdict(self), ensure_ascii=False)

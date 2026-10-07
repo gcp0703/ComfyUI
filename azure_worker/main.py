@@ -132,10 +132,17 @@ def _process_one(runner: ComfyRunner, clients: azure_io.AzureClients) -> bool:
         azure_io.send_result(clients, ImageResult.error_for(None, str(e)))
     except (ComfyJobError, Exception) as e:  # noqa: BLE001 - we want every failure on the result queue
         log.exception("job failed: %s", e)
-        azure_io.send_result(
-            clients,
-            ImageResult.error_for(req, str(e), width=width, height=height, render=render),
-        )
+        try:
+            azure_io.send_result(
+                clients,
+                ImageResult.error_for(req, str(e), width=width, height=height, render=render),
+            )
+        except Exception:
+            # A transport failure on the error path must not take the worker
+            # down with it — the inbound message is still deleted below, so
+            # the job is lost either way, but the process keeps polling.
+            job_id = req.job_id if req is not None else "unknown"
+            log.exception("job %s: failed to send error result", job_id)
     finally:
         # Always delete: result queue carries the success/error signal.
         # Switch to a dequeue_count check + leave-for-retry once we have a retry policy.

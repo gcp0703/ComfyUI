@@ -180,7 +180,11 @@ class ImageResult:
         )
 
     def to_json(self) -> str:
-        return json.dumps(asdict(self))
+        # ensure_ascii=False: \u-escaping a non-ASCII prompt roughly doubles
+        # its byte count (6 bytes/char vs 2-4 for raw UTF-8), which can push a
+        # message that fit the request-side byte check over the queue's cap
+        # on the way out. azure_io.send_result's guard assumes raw UTF-8.
+        return json.dumps(asdict(self), ensure_ascii=False)
 
 
 _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9_.-]+")
