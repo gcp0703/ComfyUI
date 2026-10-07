@@ -108,7 +108,10 @@ def test_autoroute_appends_race_lora_after_configured_stack():
     # Configured stack first, routed race LoRA last.
     assert "Fantasy_Races_XL.safetensors" in loras[0]["name"]
     assert "RPGDwarfXL.safetensors" in loras[1]["name"]
+    assert loras[0]["model_strength"] == 0.8
+    assert loras[0]["clip_strength"] == 0.8
     assert loras[1]["model_strength"] == 0.9
+    assert loras[1]["clip_strength"] == 0.9
 
 
 def test_autoroute_off_leaves_the_stack_alone():
