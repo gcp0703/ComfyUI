@@ -13,7 +13,7 @@ from azure_worker.lora_router import (
     route_race_lora,
 )
 from azure_worker.messages import ImageRequest
-from azure_worker.workflow import build_workflow, summarize_workflow
+from azure_worker.workflow import build_workflow, render_report
 
 from .test_workflow import _cfg, _sample_payload
 
@@ -103,18 +103,18 @@ def test_autoroute_appends_race_lora_after_configured_stack():
     wf = build_workflow(
         req, _cfg(PROFILE_SDXL_DREAMSHAPER, sdxl_loras=(base,), sdxl_lora_autoroute=True)
     )
-    line = summarize_workflow(wf)
+    loras = render_report(wf, PROFILE_SDXL_DREAMSHAPER)["loras"]
 
-    assert "Fantasy_Races_XL.safetensors@0.8" in line
-    assert "RPGDwarfXL.safetensors@0.9" in line
     # Configured stack first, routed race LoRA last.
-    assert line.index("Fantasy_Races_XL") < line.index("RPGDwarfXL")
+    assert "Fantasy_Races_XL.safetensors" in loras[0]["name"]
+    assert "RPGDwarfXL.safetensors" in loras[1]["name"]
+    assert loras[1]["model_strength"] == 0.9
 
 
 def test_autoroute_off_leaves_the_stack_alone():
     req = ImageRequest.from_json(_sample_payload(prompt="a regal dwarf woman"))
     wf = build_workflow(req, _cfg(PROFILE_SDXL_DREAMSHAPER, sdxl_lora_autoroute=False))
-    assert "loras=none" in summarize_workflow(wf)
+    assert render_report(wf, PROFILE_SDXL_DREAMSHAPER)["loras"] == []
 
 
 def test_autoroute_injects_trigger_into_the_positive_prompt_only():
@@ -136,5 +136,5 @@ def test_autoroute_leaves_prompt_untouched_when_trigger_already_present():
 def test_autoroute_is_a_noop_for_raceless_prompts():
     req = ImageRequest.from_json(_sample_payload(prompt="a human knight"))
     wf = build_workflow(req, _cfg(PROFILE_SDXL_DREAMSHAPER, sdxl_lora_autoroute=True))
-    assert "loras=none" in summarize_workflow(wf)
+    assert render_report(wf, PROFILE_SDXL_DREAMSHAPER)["loras"] == []
     assert wf["2"]["inputs"]["text"] == "a human knight"

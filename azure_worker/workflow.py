@@ -150,74 +150,104 @@ def effective_cfg(workflow: dict) -> float | None:
     return None
 
 
-def summarize_workflow(workflow: dict) -> str:
-    """One-line digest of the models and sampler settings in a built graph.
+_LATENT_CLASSES = ("EmptyLatentImage", "EmptySD3LatentImage", "EmptyFlux2LatentImage")
 
-    Read back out of the graph rather than off ``Config`` so the logged line
-    cannot drift from what actually executes, and so every profile reports
-    through the same code path regardless of how its sampler is wired.
+
+def workflow_dimensions(workflow: dict) -> tuple[int, int]:
+    """The output size a built graph will render, from its empty-latent node."""
+    for node in workflow.values():
+        if node.get("class_type") in _LATENT_CLASSES:
+            i = node["inputs"]
+            return int(i["width"]), int(i["height"])
+    raise ValueError("workflow has no empty-latent node")
+
+
+def render_report(workflow: dict, profile: str) -> dict:
+    """The result message's ``render`` block for a built graph.
+
+    Read back out of the graph rather than off ``Config`` so the reported
+    values cannot drift from what actually executes, and so every profile
+    reports through the same code path regardless of how its sampler is wired.
+    The dict is plain JSON types; ``summary`` is the one-line display form.
     """
-    parts: list[str] = []
-
-    models = [
-        name
-        for node in workflow.values()
-        for key in ("ckpt_name", "unet_name")
-        if (name := node.get("inputs", {}).get(key))
-    ]
-    if models:
-        parts.append("model=" + ",".join(models))
+    model = next(
+        (
+            name
+            for node in workflow.values()
+            for key in ("ckpt_name", "unet_name")
+            if (name := node.get("inputs", {}).get(key))
+        ),
+        None,
+    )
 
     lora_ids = sorted(
         (nid for nid, node in workflow.items() if node.get("class_type") == "LoraLoader"),
         key=lambda nid: int(nid) if nid.isdigit() else nid,
     )
     loras = [
-        "{lora_name}@{strength_model}/{strength_clip}".format(**workflow[nid]["inputs"])
+        {
+            "name": workflow[nid]["inputs"]["lora_name"],
+            "model_strength": workflow[nid]["inputs"]["strength_model"],
+            "clip_strength": workflow[nid]["inputs"]["strength_clip"],
+        }
         for nid in lora_ids
     ]
-    parts.append("loras=" + (",".join(loras) if loras else "none"))
 
-    # Profiles driven through ModelSamplingAuraFlow state their sigma shift
-    # explicitly: for qwen-image-2.1 it is re-derived per request from the
-    # target resolution, so it is a real sampling input that varies per job.
-    for node in workflow.values():
-        if node.get("class_type") == "ModelSamplingAuraFlow":
-            parts.append("shift={:.4f}".format(node["inputs"]["shift"]))
-            break
+    shift = next(
+        (
+            float(node["inputs"]["shift"])
+            for node in workflow.values()
+            if node.get("class_type") == "ModelSamplingAuraFlow"
+        ),
+        None,
+    )
 
+    steps = sampler = scheduler = None
     for node in workflow.values():
         if node.get("class_type") in _KSAMPLER_CLASSES:
             i = node["inputs"]
-            parts.append(
-                f"steps={i.get('steps')} cfg={i.get('cfg')} "
-                f"sampler={i.get('sampler_name')}/{i.get('scheduler')}"
-            )
+            steps, sampler, scheduler = i.get("steps"), i.get("sampler_name"), i.get("scheduler")
             break
     else:
-        # SamplerCustomAdvanced profiles: steps, cfg and sampler live on
-        # separate nodes. Collect them by field, then emit in the same order
-        # the KSampler branch uses so every profile's line reads alike.
-        found: dict[str, object] = {}
+        # SamplerCustomAdvanced profiles: steps, sampler and scheduler live on
+        # separate nodes. Flux2Scheduler has no scheduler name at all.
         for node in workflow.values():
             ct, i = node.get("class_type"), node.get("inputs", {})
             if ct in _STEPS_CLASSES:
-                found.setdefault("steps", i.get("steps"))
-                found.setdefault("scheduler", i.get("scheduler"))
-            if ct == "CFGGuider" and "cfg" in i:
-                found.setdefault("cfg", i["cfg"])
-            if ct == "KSamplerSelect" and "sampler_name" in i:
-                found.setdefault("sampler", i["sampler_name"])
-        for field in ("steps", "cfg"):
-            if found.get(field) is not None:
-                parts.append(f"{field}={found[field]}")
-        if found.get("sampler") is not None:
-            sampler = f"sampler={found['sampler']}"
-            if found.get("scheduler") is not None:
-                sampler += f"/{found['scheduler']}"
-            parts.append(sampler)
+                steps = i.get("steps") if steps is None else steps
+                scheduler = i.get("scheduler") if scheduler is None else scheduler
+            if ct == "KSamplerSelect" and sampler is None:
+                sampler = i.get("sampler_name")
 
-    return " ".join(parts)
+    cfg = effective_cfg(workflow)
+    width, height = workflow_dimensions(workflow)
+
+    # A negative prompt only reaches the model if there is a real guidance
+    # scale (cfg != 1 makes uncond matter) and nothing zeroed it out.
+    zeroed = any(node.get("class_type") == "ConditioningZeroOut" for node in workflow.values())
+    negative_honored = cfg is not None and cfg != 1.0 and not zeroed
+
+    return {
+        "profile": profile,
+        "model": model,
+        "loras": loras,
+        "steps": steps,
+        "cfg": cfg,
+        "sampler": sampler,
+        "scheduler": scheduler,
+        "shift": shift,
+        "negative_honored": negative_honored,
+        "summary": _summary(profile, model, loras, width, height, steps, cfg, sampler, scheduler),
+    }
+
+
+def _summary(profile, model, loras, width, height, steps, cfg, sampler, scheduler) -> str:
+    model_part = model.rsplit(".", 1)[0] if model else "?"
+    if loras:
+        model_part += f" + {len(loras)} lora" + ("s" if len(loras) != 1 else "")
+    cfg_part = "cfg —" if cfg is None else f"cfg {cfg}"
+    sampler_part = sampler if scheduler is None else f"{sampler}/{scheduler}"
+    return f"{profile} · {model_part} · {width}×{height} · {steps} steps · {cfg_part} · {sampler_part}"
 
 
 def build_workflow(req: ImageRequest, cfg: Config) -> dict:

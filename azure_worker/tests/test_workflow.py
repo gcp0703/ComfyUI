@@ -50,7 +50,8 @@ from azure_worker.workflow import (
     build_sdxl_dreamshaper_workflow,
     build_workflow,
     effective_cfg,
-    summarize_workflow,
+    render_report,
+    workflow_dimensions,
 )
 from azure_worker.tests.conftest import make_config as _cfg
 
@@ -446,29 +447,6 @@ def test_dispatcher_picks_qwen_image_2_1_profile():
     assert wf[QWEN21_SAVE_NODE_ID]["class_type"] == "SaveImage"
 
 
-def test_qwen_image_2_1_cfg_is_reported_as_baked():
-    """The worker logs the ignored-cfg notice off this, so it must read back 1.0."""
-    req = ImageRequest.from_json(_sample_payload())
-    wf = build_workflow(req, _cfg(PROFILE_QWEN_IMAGE_2_1))
-    assert effective_cfg(wf) == 1.0
-    assert "cfg=1.0" in summarize_workflow(wf)
-
-
-def test_qwen_image_2_1_shift_is_reported_per_resolution():
-    """The dynamic shift is a per-job sampling input, so the log line must show it."""
-    from dataclasses import replace
-
-    base = _cfg(PROFILE_QWEN_IMAGE_2_1)
-    small = replace(base, render=replace(base.render, width=1024, height=1024))
-    large = replace(base, render=replace(base.render, width=2048, height=2048))
-    req = ImageRequest.from_json(_sample_payload())
-
-    line_1k = summarize_workflow(build_workflow(req, small))
-    line_2k = summarize_workflow(build_workflow(req, large))
-    assert "shift=2.0008" in line_1k
-    assert "shift=3.7169" in line_2k
-
-
 # -- OpenFLUX.1 workflow --
 
 def test_openflux1_workflow_shape():
@@ -734,25 +712,7 @@ def test_optional_loras_rejects_malformed_entries(monkeypatch, raw):
         _optional_loras("COMFY_SDXL_LORAS")
 
 
-# --- log echo: summarize_workflow / effective_cfg ---------------------------
-
-
-def test_summarize_workflow_echoes_models_loras_and_sampler():
-    req = ImageRequest.from_json(_sample_payload(steps=6))
-    wf = build_workflow(req, _cfg(PROFILE_SDXL_DREAMSHAPER, sdxl_loras=(_ELF, _EARS)))
-    line = summarize_workflow(wf)
-
-    assert "model=DreamShaperXL_Turbo_v2_1.safetensors" in line
-    # LoRAs appear in chain order with both strengths.
-    assert "loras=dnd/RPGElfXL.safetensors@0.8/0.8,dnd/Elf_Ears_XL.safetensors@0.6/0.4" in line
-    assert "steps=6" in line
-    assert "cfg=2.0" in line
-    assert "sampler=dpmpp_sde/karras" in line
-
-
-def test_summarize_workflow_says_none_when_no_loras():
-    req = ImageRequest.from_json(_sample_payload())
-    assert "loras=none" in summarize_workflow(build_workflow(req, _cfg(PROFILE_SDXL_DREAMSHAPER)))
+# --- log echo: effective_cfg -----------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -774,26 +734,124 @@ def test_effective_cfg_reports_honored_value_for_real_cfg_profiles():
     assert effective_cfg(build_workflow(req, _cfg(PROFILE_OPENFLUX1))) == 3.5
 
 
+# -- render_report: the result's `render` block, read back out of the graph --
+
+_RENDER_KEYS = {
+    "profile", "model", "loras", "steps", "cfg", "sampler", "scheduler", "shift",
+    "negative_honored", "summary",
+}
+
+_ALL_PROFILES = [
+    PROFILE_FLUX1_DEV, PROFILE_FLUX2_KLEIN, PROFILE_CHROMA1, PROFILE_FLUXED_UP,
+    PROFILE_QWEN_IMAGE_2512, PROFILE_QWEN_IMAGE_2_1, PROFILE_OPENFLUX1,
+    PROFILE_QWEN_RAPID_AIO, PROFILE_SDXL_DREAMSHAPER,
+]
+
+
+@pytest.mark.parametrize("profile", _ALL_PROFILES)
+def test_render_report_has_exactly_the_contract_keys(profile):
+    cfg = _cfg(profile)
+    report = render_report(build_workflow(ImageRequest.from_json(_sample_payload()), cfg), profile)
+    assert set(report) == _RENDER_KEYS
+    assert report["profile"] == profile
+    assert report["model"].endswith(".safetensors")
+    assert report["steps"] == cfg.render.steps
+    assert report["cfg"] == cfg.render.cfg
+    assert report["sampler"] == cfg.render.sampler
+    assert report["scheduler"] == cfg.render.scheduler
+    assert isinstance(report["loras"], list)
+    assert isinstance(report["negative_honored"], bool)
+    assert isinstance(report["summary"], str) and report["summary"]
+    json.dumps(report)  # must be plain JSON types
+
+
+def test_render_report_model_is_the_loaded_file():
+    cfg = _cfg(PROFILE_QWEN_IMAGE_2_1)
+    report = render_report(build_workflow(ImageRequest.from_json(_sample_payload()), cfg), cfg.profile)
+    assert report["model"] == "qwen_image_2.1_int8_convrot.safetensors"
+
+    cfg = _cfg(PROFILE_SDXL_DREAMSHAPER)
+    report = render_report(build_workflow(ImageRequest.from_json(_sample_payload()), cfg), cfg.profile)
+    assert report["model"] == "DreamShaperXL_Turbo_v2_1.safetensors"
+
+
+def test_render_report_lists_loras_in_chain_order():
+    cfg = _cfg(PROFILE_SDXL_DREAMSHAPER, sdxl_loras=(_ELF, _EARS))
+    report = render_report(build_workflow(ImageRequest.from_json(_sample_payload()), cfg), cfg.profile)
+    assert report["loras"] == [
+        {"name": _ELF.name, "model_strength": 0.8, "clip_strength": 0.8},
+        {"name": _EARS.name, "model_strength": 0.6, "clip_strength": 0.4},
+    ]
+    assert "+ 2 loras" in report["summary"]
+
+
+def test_render_report_includes_autorouted_race_lora():
+    cfg = _cfg(PROFILE_SDXL_DREAMSHAPER, sdxl_loras=(_ELF,), sdxl_lora_autoroute=True)
+    req = ImageRequest.from_json(_sample_payload(prompt="a stout dwarf blacksmith"))
+    report = render_report(build_workflow(req, cfg), cfg.profile)
+    assert len(report["loras"]) == 2
+    assert "dwarf" in report["loras"][1]["name"].lower()
+
+
+def test_render_report_empty_loras_is_an_empty_list():
+    cfg = _cfg(PROFILE_FLUX1_DEV)
+    report = render_report(build_workflow(ImageRequest.from_json(_sample_payload()), cfg), cfg.profile)
+    assert report["loras"] == []
+    assert "lora" not in report["summary"]
+
+
 @pytest.mark.parametrize(
-    "profile",
+    "profile,expected",
     [
-        PROFILE_FLUX1_DEV,
-        PROFILE_FLUX2_KLEIN,
-        PROFILE_CHROMA1,
-        PROFILE_FLUXED_UP,
-        PROFILE_QWEN_IMAGE_2512,
-        PROFILE_QWEN_IMAGE_2_1,
-        PROFILE_OPENFLUX1,
-        PROFILE_QWEN_RAPID_AIO,
-        PROFILE_SDXL_DREAMSHAPER,
+        (PROFILE_FLUX1_DEV, False),        # ConditioningZeroOut, cfg 1
+        (PROFILE_FLUX2_KLEIN, False),      # BasicGuider, no cfg at all
+        (PROFILE_CHROMA1, True),
+        (PROFILE_FLUXED_UP, False),
+        (PROFILE_QWEN_IMAGE_2512, True),
+        (PROFILE_QWEN_IMAGE_2_1, False),   # real negative node, but cfg 1 makes it inert
+        (PROFILE_OPENFLUX1, True),
+        (PROFILE_QWEN_RAPID_AIO, False),
+        (PROFILE_SDXL_DREAMSHAPER, True),
     ],
 )
-def test_summarize_workflow_covers_every_profile(profile):
-    """Every profile must produce a usable log line, not just the KSampler ones."""
-    req = ImageRequest.from_json(_sample_payload(steps=6))
-    line = summarize_workflow(build_workflow(req, _cfg(profile)))
+def test_render_report_negative_honored_matches_contract_table(profile, expected):
+    cfg = _cfg(profile)
+    req = ImageRequest.from_json(_sample_payload(negative_prompt="blurry"))
+    assert render_report(build_workflow(req, cfg), profile)["negative_honored"] is expected
 
-    assert "model=" in line
-    assert "loras=" in line
-    assert f"steps={_cfg(profile).render.steps}" in line, f"{profile} did not report steps: {line!r}"
-    assert "sampler=" in line, f"{profile} did not report a sampler: {line!r}"
+
+def test_render_report_flux2_klein_has_null_cfg_and_scheduler():
+    cfg = _cfg(PROFILE_FLUX2_KLEIN)
+    report = render_report(build_workflow(ImageRequest.from_json(_sample_payload()), cfg), cfg.profile)
+    assert report["cfg"] is None
+    assert report["scheduler"] is None
+    assert report["summary"].endswith("· cfg — · euler")
+
+
+def test_render_report_shift_is_derived_for_qwen21_and_null_elsewhere():
+    from azure_worker.workflow import qwen21_shift
+
+    cfg = _cfg(PROFILE_QWEN_IMAGE_2_1)
+    report = render_report(build_workflow(ImageRequest.from_json(_sample_payload()), cfg), cfg.profile)
+    assert report["shift"] == pytest.approx(qwen21_shift(2048, 2048))
+
+    cfg = _cfg(PROFILE_CHROMA1)
+    assert render_report(build_workflow(ImageRequest.from_json(_sample_payload()), cfg), cfg.profile)["shift"] == 1.0
+
+    cfg = _cfg(PROFILE_SDXL_DREAMSHAPER)
+    assert render_report(build_workflow(ImageRequest.from_json(_sample_payload()), cfg), cfg.profile)["shift"] is None
+
+
+def test_render_report_summary_format():
+    cfg = _cfg(PROFILE_QWEN_IMAGE_2_1)
+    report = render_report(build_workflow(ImageRequest.from_json(_sample_payload()), cfg), cfg.profile)
+    assert report["summary"] == (
+        "qwen-image-2.1 · qwen_image_2.1_int8_convrot · 2048×2048 · 45 steps · cfg 1.0 · euler/simple"
+    )
+
+
+@pytest.mark.parametrize("profile", _ALL_PROFILES)
+def test_workflow_dimensions_reads_the_latent_node(profile):
+    cfg = _cfg(profile)
+    wf = build_workflow(ImageRequest.from_json(_sample_payload()), cfg)
+    assert workflow_dimensions(wf) == (cfg.render.width, cfg.render.height)
