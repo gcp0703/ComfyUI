@@ -60,8 +60,6 @@ def _sample_payload(**overrides):
         "job_id": "abc",
         "name": "test-image",
         "prompt": "a cat",
-        "width": 1024,
-        "height": 1024,
         "seed": 7,
     }
     payload.update(overrides)
@@ -97,24 +95,52 @@ def test_builders_ignore_request_size_and_steps(profile):
     assert effective_cfg(wf) == cfg.render.cfg
 
 
-# -- Message validation --
+# -- Message validation (contract v2) --
 
 def test_request_round_trip_defaults():
-    req = ImageRequest.from_json(_sample_payload())
+    req = ImageRequest.from_json(json.dumps({"job_id": "abc", "name": "test-image", "prompt": "a cat", "seed": 7}))
     assert req.job_id == "abc"
     assert req.name == "test-image"
-    assert req.steps == 20
     assert req.negative_prompt == ""
-
-
-def test_request_rejects_non_multiple_of_16():
-    with pytest.raises(MessageValidationError):
-        ImageRequest.from_json(_sample_payload(width=1032))
+    assert req.seed == 7
+    assert req.ignored_fields == ()
+    assert not hasattr(req, "width")
+    assert not hasattr(req, "steps")
 
 
 def test_request_rejects_missing_prompt():
-    with pytest.raises(MessageValidationError):
-        ImageRequest.from_json(json.dumps({"name": "x", "width": 1024, "height": 1024}))
+    with pytest.raises(MessageValidationError, match="prompt"):
+        ImageRequest.from_json(json.dumps({"name": "x"}))
+
+
+def test_request_records_legacy_fields_in_order():
+    req = ImageRequest.from_json(_sample_payload(width=1024, height=1024, steps=20, cfg=7.0))
+    assert req.ignored_fields == ("width", "height", "steps", "cfg")
+
+
+def test_request_records_only_the_legacy_fields_present():
+    req = ImageRequest.from_json(_sample_payload(steps=20))
+    assert req.ignored_fields == ("steps",)
+
+
+def test_request_legacy_fields_are_not_validated():
+    # A v1 worker rejected width=1032; v2 doesn't even look at it.
+    req = ImageRequest.from_json(_sample_payload(width=1032, steps=0, cfg="nonsense"))
+    assert req.ignored_fields == ("width", "steps", "cfg")
+
+
+def test_request_prompt_budget_is_combined():
+    ok = ImageRequest.from_json(_sample_payload(prompt="a" * 20_000, negative_prompt="b" * 12_000))
+    assert len(ok.prompt) + len(ok.negative_prompt) == 32_000
+    with pytest.raises(MessageValidationError, match="32000"):
+        ImageRequest.from_json(_sample_payload(prompt="a" * 20_000, negative_prompt="b" * 12_001))
+
+
+def test_request_rejects_oversized_message_bytes():
+    # 31k em-dashes is under the character budget but 93 KB of UTF-8.
+    raw = _sample_payload(prompt="—" * 31_000)
+    with pytest.raises(MessageValidationError, match="bytes"):
+        ImageRequest.from_json(raw)
 
 
 # -- Flux 1 dev workflow --

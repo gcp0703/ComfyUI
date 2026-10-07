@@ -9,12 +9,16 @@ from dataclasses import asdict, dataclass, field
 from typing import Optional
 
 
-MAX_PROMPT_CHARS = 4096
-MIN_DIM = 64
-MAX_DIM = 4096
-# Flux 2's EmptyFlux2LatentImage requires width/height in 16-pixel increments
-# (see nodes_flux.py: step=16 on the int inputs).
-DIM_MULTIPLE = 16
+# prompt + negative_prompt may total this many characters. Not a model limit —
+# no active profile's text encoder truncates — but a transport one: the Storage
+# Queue message is 64 KiB after base64 (~48 KiB raw), shared by every field.
+MAX_PROMPT_CHARS = 32_000
+# Byte backstop on the raw request. The queue would already have rejected
+# anything over 48 KiB; this lower bar leaves ~2 KiB for the result message's
+# added fields (render block, SAS URL) so the *reply* fits too.
+MAX_REQUEST_BYTES = 46 * 1024
+# Contract v1 request fields the worker now owns. Accepted, ignored, reported.
+LEGACY_FIELDS = ("width", "height", "steps", "cfg")
 
 
 class MessageValidationError(ValueError):
@@ -26,15 +30,19 @@ class ImageRequest:
     job_id: str
     name: str
     prompt: str
-    width: int
-    height: int
     negative_prompt: str = ""
     seed: int = 0
-    steps: int = 20
-    cfg: float = 7.0
+    # Which of LEGACY_FIELDS the client sent, in LEGACY_FIELDS order. Surfaced
+    # on the result as a warning so stale clients can be found in the field.
+    ignored_fields: tuple[str, ...] = ()
 
     @classmethod
     def from_json(cls, raw: str) -> "ImageRequest":
+        size = len(raw.encode("utf-8"))
+        if size > MAX_REQUEST_BYTES:
+            raise MessageValidationError(
+                f"message is {size} bytes; the limit is {MAX_REQUEST_BYTES} bytes"
+            )
         try:
             data = json.loads(raw)
         except json.JSONDecodeError as e:
@@ -45,25 +53,20 @@ class ImageRequest:
         job_id = str(data.get("job_id") or uuid.uuid4())
         name = data.get("name")
         prompt = data.get("prompt")
-        width = data.get("width")
-        height = data.get("height")
 
         if not isinstance(name, str) or not name.strip():
             raise MessageValidationError("'name' is required and must be a non-empty string")
         if not isinstance(prompt, str) or not prompt.strip():
             raise MessageValidationError("'prompt' is required and must be a non-empty string")
-        if len(prompt) > MAX_PROMPT_CHARS:
-            raise MessageValidationError(f"'prompt' exceeds {MAX_PROMPT_CHARS} characters")
-        if not isinstance(width, int) or not isinstance(height, int):
-            raise MessageValidationError("'width' and 'height' must be integers")
-        _validate_dim("width", width)
-        _validate_dim("height", height)
 
         negative = data.get("negative_prompt", "") or ""
         if not isinstance(negative, str):
             raise MessageValidationError("'negative_prompt' must be a string")
-        if len(negative) > MAX_PROMPT_CHARS:
-            raise MessageValidationError(f"'negative_prompt' exceeds {MAX_PROMPT_CHARS} characters")
+        total = len(prompt) + len(negative)
+        if total > MAX_PROMPT_CHARS:
+            raise MessageValidationError(
+                f"'prompt' + 'negative_prompt' total {total} characters; the limit is {MAX_PROMPT_CHARS}"
+            )
 
         seed_raw = data.get("seed")
         if seed_raw is None:
@@ -73,26 +76,15 @@ class ImageRequest:
         else:
             raise MessageValidationError("'seed' must be an integer if provided")
 
-        steps = data.get("steps", 20)
-        if not isinstance(steps, int) or not (1 <= steps <= 200):
-            raise MessageValidationError("'steps' must be an integer in [1, 200]")
-
-        cfg_raw = data.get("cfg", 7.0)
-        if isinstance(cfg_raw, int):
-            cfg_raw = float(cfg_raw)
-        if not isinstance(cfg_raw, float) or not (0.0 <= cfg_raw <= 30.0):
-            raise MessageValidationError("'cfg' must be a number in [0, 30]")
+        ignored = tuple(f for f in LEGACY_FIELDS if f in data)
 
         return cls(
             job_id=job_id,
             name=name.strip(),
             prompt=prompt,
             negative_prompt=negative,
-            width=width,
-            height=height,
             seed=seed,
-            steps=steps,
-            cfg=cfg_raw,
+            ignored_fields=ignored,
         )
 
 
@@ -121,8 +113,8 @@ class ImageResult:
             name=req.name,
             status="success",
             prompt=req.prompt,
-            width=req.width,
-            height=req.height,
+            width=0,
+            height=0,
             seed=req.seed,
             blob_name=blob_name,
             blob_url=blob_url,
@@ -146,8 +138,8 @@ class ImageResult:
             name=req.name,
             status="error",
             prompt=req.prompt,
-            width=req.width,
-            height=req.height,
+            width=0,
+            height=0,
             seed=req.seed,
             error=message,
         )
@@ -162,14 +154,3 @@ _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 def sanitize_name(name: str, fallback: str = "image") -> str:
     cleaned = _SAFE_NAME_RE.sub("_", name).strip("._")
     return cleaned or fallback
-
-
-def _validate_dim(field_name: str, value: int) -> None:
-    if not (MIN_DIM <= value <= MAX_DIM):
-        raise MessageValidationError(
-            f"'{field_name}'={value} must be in [{MIN_DIM}, {MAX_DIM}]"
-        )
-    if value % DIM_MULTIPLE != 0:
-        raise MessageValidationError(
-            f"'{field_name}'={value} must be a multiple of {DIM_MULTIPLE}"
-        )
