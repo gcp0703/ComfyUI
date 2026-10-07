@@ -23,7 +23,7 @@ def test_shipped_file_covers_every_known_profile():
 def test_shipped_values_match_the_contract_table():
     p = load_profiles()
     assert p["qwen-image-2.1"] == RenderSettings(
-        width=2048, height=2048, steps=45, cfg=1.0, sampler="euler", scheduler="simple", shift=None
+        width=2048, height=2048, steps=20, cfg=3.0, sampler="euler", scheduler="simple", shift=None
     )
     assert p["qwen-image-2512"] == RenderSettings(
         width=1328, height=1328, steps=20, cfg=4.0, sampler="euler", scheduler="simple", shift=3.1

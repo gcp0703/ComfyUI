@@ -54,8 +54,9 @@ shift = 3.1
 ["qwen-image-2.1"]
 width = 2048
 height = 2048
-steps = 45
-cfg = 1.0
+steps = 20
+cfg = 3.0                      # off the official cfg=1 recipe: enables the negative prompt
+                               # at the cost of two passes per step (hence 20 steps, not 45)
 sampler = "euler"
 scheduler = "simple"
 # shift intentionally absent — derived per-size by workflow.qwen21_shift()

@@ -420,11 +420,12 @@ def test_qwen_image_2_1_workflow_shape():
     ks = wf["7"]
     assert ks["class_type"] == "KSampler"
     assert ks["inputs"]["seed"] == 99
-    assert ks["inputs"]["steps"] == 45
+    assert ks["inputs"]["steps"] == 20
     assert ks["inputs"]["sampler_name"] == "euler"
     assert ks["inputs"]["scheduler"] == "simple"
-    # cfg comes from profiles.toml (1.0 on the official path)
-    assert ks["inputs"]["cfg"] == 1
+    # cfg comes from profiles.toml (3.0 — off the official cfg=1 path so the
+    # negative prompt actually takes effect)
+    assert ks["inputs"]["cfg"] == 3.0
     # Sampling off the shift-patched model, not the raw loader
     assert ks["inputs"]["model"] == ["4", 0]
     assert ks["inputs"]["positive"] == ["5", 0]
@@ -870,7 +871,7 @@ def test_render_report_empty_loras_is_an_empty_list():
         (PROFILE_CHROMA1, True),
         (PROFILE_FLUXED_UP, False),
         (PROFILE_QWEN_IMAGE_2512, True),
-        (PROFILE_QWEN_IMAGE_2_1, False),   # real negative node, but cfg 1 makes it inert
+        (PROFILE_QWEN_IMAGE_2_1, True),    # real negative node and cfg 3.0 in profiles.toml
         (PROFILE_OPENFLUX1, True),
         (PROFILE_QWEN_RAPID_AIO, False),
         (PROFILE_SDXL_DREAMSHAPER, True),
@@ -908,7 +909,7 @@ def test_render_report_summary_format():
     cfg = _cfg(PROFILE_QWEN_IMAGE_2_1)
     report = render_report(build_workflow(ImageRequest.from_json(_sample_payload()), cfg), cfg.profile)
     assert report["summary"] == (
-        "qwen-image-2.1 · qwen_image_2.1_int8_convrot · 2048×2048 · 45 steps · cfg 1.0 · euler/simple"
+        "qwen-image-2.1 · qwen_image_2.1_int8_convrot · 2048×2048 · 20 steps · cfg 3.0 · euler/simple"
     )
 
 

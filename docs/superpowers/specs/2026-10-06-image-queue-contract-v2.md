@@ -28,7 +28,7 @@ Prompt button can show the truth instead of a guess.
 A client sending `steps=20, cfg=7.0` had no way to know those numbers were
 frequently discarded. Six of the nine profiles bake their own guidance scale
 and ignore `cfg` outright; `qwen-rapid-aio` is a 4-step distill where
-`steps=20` wastes five times the work for no gain; `qwen-image-2.1` wants 40–50.
+`steps=20` wastes five times the work for no gain; `qwen-image-2.1`'s official recipe is 40–50 at cfg 1.
 The request fields looked authoritative and were not. The result echoed them
 back, so a saved prompt recorded the request rather than the render, and the
 Prompt button displayed numbers that never reached the sampler.
@@ -169,13 +169,13 @@ sent, and none is needed.
   "profile": "qwen-image-2.1",
   "model": "qwen_image_2.1_int8_convrot.safetensors",
   "loras": [],
-  "steps": 45,
-  "cfg": 1.0,
+  "steps": 20,
+  "cfg": 3.0,
   "sampler": "euler",
   "scheduler": "simple",
   "shift": 3.7169,
-  "negative_honored": false,
-  "summary": "qwen-image-2.1 · qwen_image_2.1_int8_convrot · 2048×2048 · 45 steps · cfg 1.0 · euler/simple"
+  "negative_honored": true,
+  "summary": "qwen-image-2.1 · qwen_image_2.1_int8_convrot · 2048×2048 · 20 steps · cfg 3.0 · euler/simple"
 }
 ```
 
@@ -221,7 +221,7 @@ Two consequences worth relying on:
 | Runtime error (OOM, timeout, model load failure) | **object** | The graph existed; this tells you what was being attempted when it died. |
 
 A runtime error with a populated `render` is the useful case: it is how you
-learn that the OOM happened at 2048×2048 and 45 steps.
+learn that the OOM happened at 2048×2048 and 20 steps.
 
 ---
 
@@ -238,7 +238,7 @@ but they tell you what sizes and shapes to expect.
 | `chroma1` | 1024×1024 | 26 | 3.5 | euler / beta | **true** |
 | `fluxed-up` | 1024×1024 | 20 | 1.0 | euler / simple | false |
 | `qwen-image-2512` | 1328×1328 | 20 | 4.0 | euler / simple | **true** |
-| `qwen-image-2.1` | 2048×2048 | 45 | 1.0 | euler / simple | false |
+| `qwen-image-2.1` | 2048×2048 | 20 | 3.0 | euler / simple | **true** |
 | `openflux1` | 1024×1024 | 20 | 3.5 | euler / simple | **true** |
 | `qwen-rapid-aio` | 1024×1024 | 4 | 1.0 | euler_ancestral / beta | false |
 | `sdxl-dreamshaper` | 1024×1024 | 6 | 2.0 | dpmpp_sde / karras | **true** |
@@ -268,13 +268,13 @@ result is the authoritative record; never infer settings from the profile name.
     "profile": "qwen-image-2.1",
     "model": "qwen_image_2.1_int8_convrot.safetensors",
     "loras": [],
-    "steps": 45,
-    "cfg": 1.0,
+    "steps": 20,
+    "cfg": 3.0,
     "sampler": "euler",
     "scheduler": "simple",
     "shift": 3.7169,
-    "negative_honored": false,
-    "summary": "qwen-image-2.1 · qwen_image_2.1_int8_convrot · 2048×2048 · 45 steps · cfg 1.0 · euler/simple"
+    "negative_honored": true,
+    "summary": "qwen-image-2.1 · qwen_image_2.1_int8_convrot · 2048×2048 · 20 steps · cfg 3.0 · euler/simple"
   },
   "warnings": [],
   "blob_url": "https://nomadimagegen.blob.core.windows.net/generated-images/guildmaster-assassins-1/guildmaster-assassins-1_00001_.png?se=...&sig=...",
@@ -317,7 +317,7 @@ Request: `{"name": "x", "prompt": "...", "width": 1024, "height": 1024, "steps":
   "status": "success",
   "width": 2048,
   "height": 2048,
-  "render": { "steps": 45, "cfg": 1.0, "...": "..." },
+  "render": { "steps": 20, "cfg": 3.0, "...": "..." },
   "warnings": ["ignored client-supplied fields: width, height, steps, cfg"]
 }
 ```
@@ -356,8 +356,8 @@ for — the result describes the PNG, not the request.
   "render": {
     "profile": "qwen-image-2.1",
     "model": "qwen_image_2.1_int8_convrot.safetensors",
-    "steps": 45,
-    "cfg": 1.0,
+    "steps": 20,
+    "cfg": 3.0,
     "...": "..."
   },
   "warnings": [],
@@ -368,7 +368,7 @@ for — the result describes the PNG, not the request.
 ```
 
 No PNG exists, but the graph did, so `width`/`height` and `render` together say
-exactly what was being attempted: 2048×2048 at 45 steps. That is the whole
+exactly what was being attempted: 2048×2048 at 20 steps. That is the whole
 point of populating `render` on runtime failures.
 
 ---

@@ -155,7 +155,7 @@ def test_process_one_success_reports_render_and_graph_size(monkeypatch):
     assert r["job_id"] == "j1"
     assert (r["width"], r["height"]) == (2048, 2048)
     assert r["render"]["profile"] == "qwen-image-2.1"
-    assert r["render"]["steps"] == 45
+    assert r["render"]["steps"] == 20
     assert r["render"]["model"] == "qwen_image_2.1_int8_convrot.safetensors"
     assert r["warnings"] == []
     assert r["blob_name"] == "test-image/test-image_00001_.png"
@@ -180,7 +180,7 @@ def test_process_one_legacy_fields_are_ignored_and_warned(monkeypatch):
     r = sent[0]
     assert r["status"] == "success"
     assert (r["width"], r["height"]) == (2048, 2048)   # the render, not the request
-    assert r["render"]["steps"] == 45
+    assert r["render"]["steps"] == 20
     assert r["warnings"] == ["ignored client-supplied fields: width, height, steps, cfg"]
 
 
@@ -193,7 +193,7 @@ def test_process_one_runtime_error_keeps_render(monkeypatch):
     r = sent[0]
     assert r["status"] == "error"
     assert "CUDA out of memory" in r["error"]
-    assert r["render"]["steps"] == 45
+    assert r["render"]["steps"] == 20
     assert (r["width"], r["height"]) == (2048, 2048)
     assert r["blob_url"] is None
     assert deleted == ["m1"]   # always deleted; the result queue carries the signal
