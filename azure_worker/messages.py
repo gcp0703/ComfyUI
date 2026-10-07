@@ -88,15 +88,30 @@ class ImageRequest:
         )
 
 
+def warnings_for(req: "ImageRequest") -> list[str]:
+    """Non-fatal notes for the client. Today: which contract-v1 fields were ignored."""
+    if not req.ignored_fields:
+        return []
+    return [f"ignored client-supplied fields: {', '.join(req.ignored_fields)}"]
+
+
 @dataclass
 class ImageResult:
+    """One outbound message. Every key is always present (contract v2 §3)."""
+
     job_id: str
     name: str
     status: str  # "success" | "error"
     prompt: str
+    negative_prompt: str
+    # The PNG's real dimensions on success; the graph's intended size on a
+    # runtime error; 0 when validation failed before a graph existed.
     width: int
     height: int
     seed: int
+    # workflow.render_report() output, or None when no graph was built.
+    render: Optional[dict] = None
+    warnings: list[str] = field(default_factory=list)
     blob_url: Optional[str] = None
     blob_name: Optional[str] = None
     error: Optional[str] = None
@@ -107,27 +122,44 @@ class ImageResult:
         req: ImageRequest,
         blob_name: str,
         blob_url: str,
+        *,
+        width: int,
+        height: int,
+        render: dict,
     ) -> "ImageResult":
         return cls(
             job_id=req.job_id,
             name=req.name,
             status="success",
             prompt=req.prompt,
-            width=0,
-            height=0,
+            negative_prompt=req.negative_prompt,
+            width=width,
+            height=height,
             seed=req.seed,
+            render=render,
+            warnings=warnings_for(req),
             blob_name=blob_name,
             blob_url=blob_url,
         )
 
     @classmethod
-    def error_for(cls, req: Optional[ImageRequest], message: str, raw_job_id: str = "") -> "ImageResult":
+    def error_for(
+        cls,
+        req: Optional[ImageRequest],
+        message: str,
+        *,
+        raw_job_id: str = "",
+        width: int = 0,
+        height: int = 0,
+        render: Optional[dict] = None,
+    ) -> "ImageResult":
         if req is None:
             return cls(
                 job_id=raw_job_id or "unknown",
                 name="unknown",
                 status="error",
                 prompt="",
+                negative_prompt="",
                 width=0,
                 height=0,
                 seed=0,
@@ -138,9 +170,12 @@ class ImageResult:
             name=req.name,
             status="error",
             prompt=req.prompt,
-            width=0,
-            height=0,
+            negative_prompt=req.negative_prompt,
+            width=width,
+            height=height,
             seed=req.seed,
+            render=render,
+            warnings=warnings_for(req),
             error=message,
         )
 

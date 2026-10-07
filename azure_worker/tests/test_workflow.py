@@ -551,22 +551,63 @@ def test_dispatcher_picks_qwen_rapid_aio_for_qwen_rapid_aio_profile():
     assert wf[QWEN_RAPID_SAVE_NODE_ID]["class_type"] == "SaveImage"
 
 
-# -- Result message --
+# -- Result message (contract v2) --
 
-def test_result_success_serializes():
-    req = ImageRequest.from_json(_sample_payload())
-    result = ImageResult.success(req, blob_name="x/y.png", blob_url="https://example/y.png?sas")
+_RENDER = {
+    "profile": "qwen-image-2.1", "model": "m.safetensors", "loras": [], "steps": 45,
+    "cfg": 1.0, "sampler": "euler", "scheduler": "simple", "shift": 3.7169,
+    "negative_honored": False, "summary": "s",
+}
+
+_RESULT_KEYS = [
+    "job_id", "name", "status", "prompt", "negative_prompt", "width", "height", "seed",
+    "render", "warnings", "blob_url", "blob_name", "error",
+]
+
+
+def test_result_success_serializes_contract_v2():
+    req = ImageRequest.from_json(_sample_payload(negative_prompt="blurry"))
+    result = ImageResult.success(req, "x/y.png", "https://example/y.png?sas", width=2048, height=2048, render=_RENDER)
     parsed = json.loads(result.to_json())
+    assert list(parsed) == _RESULT_KEYS
     assert parsed["status"] == "success"
+    assert parsed["negative_prompt"] == "blurry"
+    assert (parsed["width"], parsed["height"]) == (2048, 2048)
+    assert parsed["render"] == _RENDER
+    assert parsed["warnings"] == []
     assert parsed["blob_name"] == "x/y.png"
     assert parsed["error"] is None
 
 
-def test_result_error_when_request_was_invalid():
-    result = ImageResult.error_for(None, "bad json")
-    parsed = json.loads(result.to_json())
+def test_result_warns_about_legacy_fields():
+    req = ImageRequest.from_json(_sample_payload(width=1024, height=1024, steps=20, cfg=7.0))
+    result = ImageResult.success(req, "x/y.png", "u", width=2048, height=2048, render=_RENDER)
+    assert json.loads(result.to_json())["warnings"] == [
+        "ignored client-supplied fields: width, height, steps, cfg"
+    ]
+
+
+def test_result_validation_error_has_null_render_and_zero_size():
+    parsed = json.loads(ImageResult.error_for(None, "bad json").to_json())
+    assert list(parsed) == _RESULT_KEYS
     assert parsed["status"] == "error"
     assert parsed["error"] == "bad json"
+    assert parsed["job_id"] == "unknown"
+    assert parsed["render"] is None
+    assert (parsed["width"], parsed["height"]) == (0, 0)
+    assert parsed["warnings"] == []
+    assert parsed["blob_url"] is None
+
+
+def test_result_runtime_error_keeps_render_and_intended_size():
+    req = ImageRequest.from_json(_sample_payload(steps=20))
+    result = ImageResult.error_for(req, "CUDA out of memory", width=2048, height=2048, render=_RENDER)
+    parsed = json.loads(result.to_json())
+    assert parsed["status"] == "error"
+    assert parsed["render"] == _RENDER
+    assert (parsed["width"], parsed["height"]) == (2048, 2048)
+    assert parsed["seed"] == 7
+    assert parsed["warnings"] == ["ignored client-supplied fields: steps"]
     assert parsed["blob_url"] is None
 
 
