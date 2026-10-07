@@ -49,7 +49,10 @@ def _write(tmp_path: Path, body: str) -> Path:
 
 
 def test_missing_required_profile_is_an_error(tmp_path):
-    f = _write(tmp_path, '[flux1-dev]\nwidth = 1024\nheight = 1024\nsteps = 20\nsampler = "euler"\n')
+    f = _write(
+        tmp_path,
+        '[flux1-dev]\nwidth = 1024\nheight = 1024\nsteps = 20\nsampler = "euler"\ncfg = 1.0\nscheduler = "simple"\n',
+    )
     with pytest.raises(ProfileError, match="chroma1"):
         load_profiles(f, required=("flux1-dev", "chroma1"))
 
@@ -84,6 +87,43 @@ def test_unknown_key_is_an_error(tmp_path):
     f = _write(tmp_path, '[p]\nwidth = 1024\nheight = 1024\nsteps = 20\nsampler = "euler"\nstep = 4\n')
     with pytest.raises(ProfileError, match="step"):
         load_profiles(f)
+
+
+def test_chroma1_without_shift_is_an_error(tmp_path):
+    f = _write(
+        tmp_path,
+        '[chroma1]\nwidth = 1024\nheight = 1024\nsteps = 26\ncfg = 3.5\nsampler = "euler"\nscheduler = "beta"\n',
+    )
+    with pytest.raises(ProfileError, match="shift"):
+        load_profiles(f)
+
+
+def test_qwen_image_2_1_with_shift_is_an_error(tmp_path):
+    f = _write(
+        tmp_path,
+        '["qwen-image-2.1"]\nwidth = 2048\nheight = 2048\nsteps = 45\ncfg = 1.0\n'
+        'sampler = "euler"\nscheduler = "simple"\nshift = 1.0\n',
+    )
+    with pytest.raises(ProfileError, match="unexpected"):
+        load_profiles(f)
+
+
+def test_flux2_klein_with_cfg_is_an_error(tmp_path):
+    f = _write(
+        tmp_path,
+        '[flux2-klein]\nwidth = 1024\nheight = 1024\nsteps = 20\nsampler = "euler"\ncfg = 1.0\n',
+    )
+    with pytest.raises(ProfileError):
+        load_profiles(f)
+
+
+def test_shipped_file_still_loads_under_the_per_profile_schema():
+    # test_shipped_file_covers_every_known_profile already loads the shipped
+    # file; this just names the guarantee this finding is about explicitly.
+    profiles = load_profiles()
+    assert profiles["chroma1"].shift == 1.0
+    assert profiles["qwen-image-2.1"].shift is None
+    assert profiles["flux2-klein"].cfg is None and profiles["flux2-klein"].scheduler is None
 
 
 def test_default_path_points_inside_the_package():

@@ -31,6 +31,21 @@ MIN_CFG, MAX_CFG = 0.0, 30.0
 _REQUIRED_KEYS = ("width", "height", "steps", "sampler")
 _OPTIONAL_KEYS = ("cfg", "scheduler", "shift")
 
+# Which of the optional keys each shipped profile must have — exactly these,
+# no more and no fewer. A missing one would surface as a TypeError inside
+# render_report on every job; an extra one would be silently ignored.
+PROFILE_OPTIONAL_KEYS: dict[str, frozenset[str]] = {
+    "flux1-dev":        frozenset({"cfg", "scheduler"}),
+    "flux2-klein":      frozenset(),
+    "chroma1":          frozenset({"cfg", "scheduler", "shift"}),
+    "fluxed-up":        frozenset({"cfg", "scheduler"}),
+    "qwen-image-2512":  frozenset({"cfg", "scheduler", "shift"}),
+    "qwen-image-2.1":   frozenset({"cfg", "scheduler"}),
+    "openflux1":        frozenset({"cfg", "scheduler"}),
+    "qwen-rapid-aio":   frozenset({"cfg", "scheduler"}),
+    "sdxl-dreamshaper": frozenset({"cfg", "scheduler"}),
+}
+
 
 class ProfileError(RuntimeError):
     pass
@@ -69,6 +84,16 @@ def load_profiles(
     for name, table in data.items():
         if not isinstance(table, dict):
             raise ProfileError(f"{path}: [{name}] must be a table")
+        if name in PROFILE_OPTIONAL_KEYS:
+            expected = PROFILE_OPTIONAL_KEYS[name]
+            present = set(table) & {"cfg", "scheduler", "shift"}
+            if present != expected:
+                missing = expected - present
+                extra = present - expected
+                raise ProfileError(
+                    f"{path}: [{name}] must have exactly these optional keys: "
+                    f"{sorted(expected)}; missing {sorted(missing)}, unexpected {sorted(extra)}"
+                )
         profiles[name] = _parse_table(name, table, path)
 
     missing = [p for p in required if p not in profiles]

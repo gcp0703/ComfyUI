@@ -85,11 +85,15 @@ pip install -r azure_worker/requirements.txt
 ### Render settings (`profiles.toml`)
 
 Not environment variables. `azure_worker/profiles.toml` holds one table per
-profile with `width`, `height`, `steps`, `cfg`, `sampler`, `scheduler` and
-optionally `shift`. The file is validated at startup (dimensions 64-4096 and
-multiples of 16, steps 1-200, cfg 0-30); a bad value is a config error before
-the first job. The active profile's settings are logged on the `starting
-ComfyUI runner` line.
+profile with `width`, `height`, `steps` and `sampler` required, and `cfg`,
+`scheduler` and `shift` optional — which of those three a given profile needs
+varies (e.g. `flux2-klein` has none of them; `chroma1` needs all three). The
+file is validated at startup: value ranges (dimensions 64-4096 and multiples
+of 16, steps 1-200, cfg 0-30) and, for each of the profiles the worker ships
+with, that it has exactly the optional keys its sampler wiring needs — no
+more, no fewer. A bad value, or a profile missing/carrying the wrong optional
+keys, is a config error before the first job. The active profile's settings
+are logged on the `starting ComfyUI runner` line.
 
 ## Running
 
