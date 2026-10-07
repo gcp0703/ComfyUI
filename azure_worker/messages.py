@@ -22,7 +22,9 @@ LEGACY_FIELDS = ("width", "height", "steps", "cfg")
 
 
 class MessageValidationError(ValueError):
-    pass
+    def __init__(self, message: str, job_id: str = "") -> None:
+        super().__init__(message)
+        self.job_id = job_id
 
 
 @dataclass
@@ -50,22 +52,33 @@ class ImageRequest:
         if not isinstance(data, dict):
             raise MessageValidationError("message must be a JSON object")
 
-        job_id = str(data.get("job_id") or uuid.uuid4())
+        # The only durable correlation key (SPEC §8) — preserved on every
+        # validation error raised below so a client can still match the
+        # error result to the request it sent, even though the request was
+        # rejected. Never invented here: only the success path below gets a
+        # fresh UUID when the client omitted one.
+        raw_job_id = str(data.get("job_id") or "")
+
         name = data.get("name")
         prompt = data.get("prompt")
 
         if not isinstance(name, str) or not name.strip():
-            raise MessageValidationError("'name' is required and must be a non-empty string")
+            raise MessageValidationError(
+                "'name' is required and must be a non-empty string", job_id=raw_job_id
+            )
         if not isinstance(prompt, str) or not prompt.strip():
-            raise MessageValidationError("'prompt' is required and must be a non-empty string")
+            raise MessageValidationError(
+                "'prompt' is required and must be a non-empty string", job_id=raw_job_id
+            )
 
         negative = data.get("negative_prompt", "") or ""
         if not isinstance(negative, str):
-            raise MessageValidationError("'negative_prompt' must be a string")
+            raise MessageValidationError("'negative_prompt' must be a string", job_id=raw_job_id)
         total = len(prompt) + len(negative)
         if total > MAX_PROMPT_CHARS:
             raise MessageValidationError(
-                f"'prompt' + 'negative_prompt' total {total} characters; the limit is {MAX_PROMPT_CHARS}"
+                f"'prompt' + 'negative_prompt' total {total} characters; the limit is {MAX_PROMPT_CHARS}",
+                job_id=raw_job_id,
             )
 
         seed_raw = data.get("seed")
@@ -74,12 +87,12 @@ class ImageRequest:
         elif isinstance(seed_raw, int):
             seed = seed_raw
         else:
-            raise MessageValidationError("'seed' must be an integer if provided")
+            raise MessageValidationError("'seed' must be an integer if provided", job_id=raw_job_id)
 
         ignored = tuple(f for f in LEGACY_FIELDS if f in data)
 
         return cls(
-            job_id=job_id,
+            job_id=raw_job_id or str(uuid.uuid4()),
             name=name.strip(),
             prompt=prompt,
             negative_prompt=negative,

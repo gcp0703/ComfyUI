@@ -129,7 +129,7 @@ def _process_one(runner: ComfyRunner, clients: azure_io.AzureClients) -> bool:
         log.info("job %s complete: %s", req.job_id, blob_name)
     except MessageValidationError as e:
         log.warning("invalid message (dequeue_count=%s): %s", msg.dequeue_count, e)
-        azure_io.send_result(clients, ImageResult.error_for(None, str(e)))
+        azure_io.send_result(clients, ImageResult.error_for(None, str(e), raw_job_id=e.job_id))
     except (ComfyJobError, Exception) as e:  # noqa: BLE001 - we want every failure on the result queue
         log.exception("job failed: %s", e)
         try:

@@ -114,6 +114,18 @@ def test_request_rejects_missing_prompt():
         ImageRequest.from_json(json.dumps({"name": "x"}))
 
 
+def test_request_validation_error_preserves_job_id():
+    with pytest.raises(MessageValidationError) as exc_info:
+        ImageRequest.from_json('{"job_id": "j9", "name": "x"}')
+    assert exc_info.value.job_id == "j9"
+
+
+def test_request_validation_error_has_empty_job_id_when_omitted():
+    with pytest.raises(MessageValidationError) as exc_info:
+        ImageRequest.from_json('{"name": "x"}')
+    assert exc_info.value.job_id == ""
+
+
 def test_request_records_legacy_fields_in_order():
     req = ImageRequest.from_json(_sample_payload(width=1024, height=1024, steps=20, cfg=7.0))
     assert req.ignored_fields == ("width", "height", "steps", "cfg")

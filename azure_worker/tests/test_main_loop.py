@@ -201,7 +201,7 @@ def test_process_one_runtime_error_keeps_render(monkeypatch):
 
 def test_process_one_validation_error_has_null_render(monkeypatch):
     runner = _Runner([])
-    clients, sent, deleted = _wire(monkeypatch, {"name": "x"}, runner)   # no prompt
+    clients, sent, deleted = _wire(monkeypatch, {"job_id": "jv", "name": "x"}, runner)   # no prompt
 
     main._process_one(runner, clients)
 
@@ -212,6 +212,19 @@ def test_process_one_validation_error_has_null_render(monkeypatch):
     assert (r["width"], r["height"]) == (0, 0)
     assert runner.calls == []
     assert deleted == ["m1"]
+    assert r["job_id"] == "jv"
+    assert r["name"] == "unknown"
+
+
+def test_process_one_validation_error_without_job_id_reports_unknown(monkeypatch):
+    runner = _Runner([])
+    clients, sent, deleted = _wire(monkeypatch, {"name": "x"}, runner)   # no prompt, no job_id
+
+    main._process_one(runner, clients)
+
+    r = sent[0]
+    assert r["job_id"] == "unknown"
+    assert r["name"] == "unknown"
 
 
 # -- _process_one + the real azure_io.send_result guard (Finding 1) --
