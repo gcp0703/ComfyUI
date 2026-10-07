@@ -16,18 +16,22 @@ Nine model profiles are supported and selected at startup via `COMFY_PROFILE`:
 
 | Profile | Models | Notes |
 |---|---|---|
-| `flux1-dev` | `flux1-dev.safetensors` + DualCLIP (`clip_l` + `t5xxl_fp16`) + Flux 1 VAE (`ae.safetensors`) | Guidance-distilled - `cfg` and `negative_prompt` are no-ops. |
-| `flux2-klein` | `flux-2-klein-9b-fp8.safetensors` + CLIPLoader(type=flux2) with Qwen3 + 128-ch Flux 2 VAE | Guidance-distilled - `cfg` and `negative_prompt` are no-ops. |
-| `chroma1` | `Chroma1-HD-fp8mixed.safetensors` + CLIPLoader(type=chroma) with T5-XXL + Flux 1 VAE | De-distilled - **`cfg` and `negative_prompt` are honored.** Beta scheduler, Euler sampler, sigma shift 1.0 are baked in. |
-| `fluxed-up` | `fluxedUpFluxNSFW_40DevFp8.safetensors` (fp8) + reuses flux1 DualCLIP + Flux 1 VAE | NSFW Flux 1 dev finetune. Same guidance-distilled driving as `flux1-dev` - `cfg` and `negative_prompt` are no-ops. |
-| `qwen-image-2512` | `qwen_image_2512_fp8_e4m3fn.safetensors` + CLIPLoader(type=qwen_image) with Qwen 2.5 VL 7B + `qwen_image_vae.safetensors` | Alibaba Qwen-Image (Dec 2025). **`cfg` and `negative_prompt` are honored.** Euler + simple, sigma shift 3.1. Recommended: steps=20-50, cfg=4.0. |
-| `qwen-image-2.1` | `qwen_image_2.1_int8_convrot.safetensors` + CLIPLoader(type=qwen_image) with Qwen3-VL 8B + `qwen_image_2.1_vae_bf16.safetensors` | Alibaba Qwen-Image 2.1 (Sept 2026). Prompt is encoded by `TextEncodeQwenImage21`, which emits both conditioning branches. cfg=1 and `negative_prompt` are baked/no-ops on the official path; `steps` is honored (template starts at 25, pipeline recommends 40-50). The official dynamic shift is re-derived per request from `width`/`height` and patched in, so 2K output gets the model's tuned schedule. |
-| `openflux1` | `openflux1-v0.1.0-fp8.safetensors` (fp8) + reuses flux1 DualCLIP + Flux 1 VAE | ostris/OpenFLUX.1 - de-distilled Flux 1 schnell. Same Flux 1 architecture. **`cfg` and `negative_prompt` are honored.** Recommended: cfg≈3.5, steps≥20. |
-| `qwen-rapid-aio` | `Qwen-Rapid-AIO-NSFW-v23.safetensors` - **all-in-one** checkpoint (UNet+CLIP+VAE merged), loaded with `CheckpointLoaderSimple` + `TextEncodeQwenImageEditPlus` | Phr00t/Qwen-Image-Edit-Rapid-AIO. 4-step distilled accelerator merge - `cfg=1` + `euler_ancestral`/`beta` baked in, so **`cfg` and `negative_prompt` are no-ops**. NSFW LoRAs merged in (no trigger word). Recommended: steps=4 (4-8). |
-| `sdxl-dreamshaper` | `DreamShaperXL_Turbo_v2_1.safetensors` - SDXL 1.0 checkpoint (CLIP + VAE baked in) plus an optional `LoraLoader` stack | Lykon DreamShaper XL Turbo v2.1. `dpmpp_sde`/`karras` at cfg=2 are baked in per the model card, so **`cfg` is a no-op**; `negative_prompt` and `steps` are honored (4-8 recommended). |
+| `flux1-dev` | `flux1-dev.safetensors` + DualCLIP (`clip_l` + `t5xxl_fp16`) + Flux 1 VAE (`ae.safetensors`) | Guidance-distilled - `negative_prompt` is a no-op. |
+| `flux2-klein` | `flux-2-klein-9b-fp8.safetensors` + CLIPLoader(type=flux2) with Qwen3 + 128-ch Flux 2 VAE | Guidance-distilled - `negative_prompt` is a no-op (`BasicGuider` has no negative path). |
+| `chroma1` | `Chroma1-HD-fp8mixed.safetensors` + CLIPLoader(type=chroma) with T5-XXL + Flux 1 VAE | De-distilled - **`negative_prompt` is honored.** Beta scheduler, Euler sampler are baked in. |
+| `fluxed-up` | `fluxedUpFluxNSFW_40DevFp8.safetensors` (fp8) + reuses flux1 DualCLIP + Flux 1 VAE | NSFW Flux 1 dev finetune. Same guidance-distilled driving as `flux1-dev` - `negative_prompt` is a no-op. |
+| `qwen-image-2512` | `qwen_image_2512_fp8_e4m3fn.safetensors` + CLIPLoader(type=qwen_image) with Qwen 2.5 VL 7B + `qwen_image_vae.safetensors` | Alibaba Qwen-Image (Dec 2025). **`negative_prompt` is honored.** Euler + simple sampling. |
+| `qwen-image-2.1` | `qwen_image_2.1_int8_convrot.safetensors` + CLIPLoader(type=qwen_image) with Qwen3-VL 8B + `qwen_image_2.1_vae_bf16.safetensors` | Alibaba Qwen-Image 2.1 (Sept 2026). Prompt is encoded by `TextEncodeQwenImage21`, which emits both conditioning branches. `negative_prompt` is a no-op (cfg=1 baked in on the official path). The official dynamic shift is derived from the profile's configured width/height in `profiles.toml` and patched in automatically. |
+| `openflux1` | `openflux1-v0.1.0-fp8.safetensors` (fp8) + reuses flux1 DualCLIP + Flux 1 VAE | ostris/OpenFLUX.1 - de-distilled Flux 1 schnell. Same Flux 1 architecture. **`negative_prompt` is honored.** |
+| `qwen-rapid-aio` | `Qwen-Rapid-AIO-NSFW-v23.safetensors` - **all-in-one** checkpoint (UNet+CLIP+VAE merged), loaded with `CheckpointLoaderSimple` + `TextEncodeQwenImageEditPlus` | Phr00t/Qwen-Image-Edit-Rapid-AIO. 4-step distilled accelerator merge: **`negative_prompt` is a no-op**, because `euler_ancestral`/`beta` and a pinned cfg are baked in. NSFW LoRAs merged in (no trigger word). |
+| `sdxl-dreamshaper` | `DreamShaperXL_Turbo_v2_1.safetensors` - SDXL 1.0 checkpoint (CLIP + VAE baked in) plus an optional `LoraLoader` stack | Lykon DreamShaper XL Turbo v2.1. `dpmpp_sde`/`karras` are baked in per the model card; **`negative_prompt` is honored**. |
 
-All profile blocks must be filled in `.env`; only the active profile is
-actually loaded into VRAM. Switching profiles requires restarting the worker.
+Model filenames for all profile blocks must be filled in `.env`; only the
+active profile is actually loaded into VRAM. Output size, step count, guidance
+scale, sampler and scheduler per profile live in **`profiles.toml`** (tracked
+in git) — edit that file to retune a profile; no code change needed. Every
+result message reports the values that actually ran in its `render` block.
+Switching profiles requires restarting the worker.
 
 The worker uses ComfyUI's production execution path — it boots a
 `PromptServer` and submits to `prompt_queue` exactly like the HTTP `/prompt`
@@ -78,6 +82,15 @@ pip install -r azure_worker/requirements.txt
 | `VISIBILITY_TIMEOUT_SECONDS` | no | `300` | Inbound message visibility timeout while a job runs. |
 | `MAX_DEQUEUE_COUNT` | no | `3` | Reserved for future retry policy; currently unused. |
 
+### Render settings (`profiles.toml`)
+
+Not environment variables. `azure_worker/profiles.toml` holds one table per
+profile with `width`, `height`, `steps`, `cfg`, `sampler`, `scheduler` and
+optionally `shift`. The file is validated at startup (dimensions 64-4096 and
+multiples of 16, steps 1-200, cfg 0-30); a bad value is a config error before
+the first job. The active profile's settings are logged on the `starting
+ComfyUI runner` line.
+
 ## Running
 
 ```
@@ -89,55 +102,40 @@ ComfyUI argparser never sees foreign options.
 
 ## Message contracts
 
+The authoritative contract is SPEC.md §5–§6 and
+docs/superpowers/specs/2026-10-06-image-queue-contract-v2.md.
+
 ### Inbound (`AZURE_INBOUND_QUEUE`), base64-encoded JSON
 
 ```json
 {
-  "job_id": "uuid",
-  "name": "sunset-over-mountains",
-  "prompt": "a serene sunset over snowy mountains, oil painting",
-  "negative_prompt": "blurry, low quality",
-  "width": 768,
-  "height": 512,
-  "seed": 12345,
-  "steps": 20,
-  "cfg": 7.0
+  "job_id": "string, optional",
+  "name": "string, required",
+  "prompt": "string, required",
+  "negative_prompt": "string, optional, default \"\"",
+  "seed": "integer, optional"
 }
 ```
-
-- `job_id`, `negative_prompt`, `seed`, `steps`, `cfg` are optional.
-- `width` and `height` must be in `[64, 4096]` and multiples of 16.
-- `negative_prompt` and `cfg` are **honored on `chroma1`, `qwen-image-2512`,
-  and `openflux1`**. Flux 1 dev and Fluxed Up both use `KSampler(cfg=1)` with
-  `ConditioningZeroOut`; Flux 2 Klein uses `BasicGuider` with no negative path;
-  Qwen-Image 2.1 bakes `cfg=1` and ignores the negative. Recommended values:
-  - **Chroma**: `steps=26, cfg=3.5` (workable range 3.5–7), native 1024² or 1152².
-  - **Qwen-Image 2512**: `steps=20–50, cfg=4.0`, native 1328² (aspect-ratio
-    sweet spots: 1664×928 16:9, 1472×1104 4:3, 1584×1056 3:2).
-  - **Qwen-Image 2.1**: `steps=40–50` (25 is a usable floor; `cfg=1`, so
-    `cfg`/`negative_prompt` are no-ops). Native 2K, so up to 2048×2048; the
-    per-resolution shift is derived from the requested size automatically.
-  - **OpenFLUX.1**: `steps≥20, cfg≈3.5`, native 1024² (any Flux 1 resolution works).
-- A missing/invalid message produces an error result and is deleted from the
-  inbound queue (no retries yet).
 
 ### Outbound (`AZURE_OUTBOUND_QUEUE`), base64-encoded JSON
 
 ```json
 {
-  "job_id": "uuid",
-  "name": "sunset-over-mountains",
-  "status": "success",
-  "prompt": "...",
-  "width": 768, "height": 512, "seed": 12345,
-  "blob_url": "https://<acct>.blob.core.windows.net/<container>/<blob>?<SAS>",
-  "blob_name": "sunset-over-mountains/sunset-over-mountains_00001.png",
-  "error": null
+  "job_id": "string",
+  "name": "string",
+  "status": "success" | "error",
+  "prompt": "string",
+  "negative_prompt": "string",
+  "width": "integer",
+  "height": "integer",
+  "seed": "integer",
+  "render": "object | null",
+  "warnings": ["string"],
+  "blob_url": "string | null",
+  "blob_name": "string | null",
+  "error": "string | null"
 }
 ```
-
-`status` is `"error"` on any failure; `error` carries the message, and
-`blob_url`/`blob_name` are `null`.
 
 ## End-to-end smoke test (Azurite)
 

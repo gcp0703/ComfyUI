@@ -15,7 +15,7 @@ The worker exposes two independent pipelines:
 
 ## 1. Architecture in one paragraph
 
-A producer enqueues a JSON request describing an image (prompt + size) onto
+A producer enqueues a JSON request describing an image (prompts + seed) onto
 the **inbound** Storage Queue. A pool of one or more ComfyUI workers polls
 that queue, runs the generation, uploads the resulting PNG to a Blob Storage
 container, and enqueues a JSON result message — containing a short-lived
@@ -109,11 +109,7 @@ A single JSON object:
   "name": "string, required",
   "prompt": "string, required",
   "negative_prompt": "string, optional, default \"\"",
-  "width": "integer, required",
-  "height": "integer, required",
-  "seed": "integer, optional",
-  "steps": "integer, optional, default 20",
-  "cfg": "number, optional, default 7.0"
+  "seed": "integer, optional"
 }
 ```
 
@@ -123,13 +119,16 @@ A single JSON object:
 |---|---|---|---|
 | `job_id` | string | no | If omitted, the worker generates a UUID. **Provide your own UUID** if you want to correlate requests with results — see §8. |
 | `name` | string | yes | Non-empty. Becomes the filename prefix for the generated PNG (sanitized — non-alphanumeric chars are replaced with `_`). Does not need to be unique. |
-| `prompt` | string | yes | Non-empty. Max 4000 chars. |
-| `negative_prompt` | string | no | Max 4000 chars. **Honored on `chroma1`, `qwen-image-2512`, and `openflux1`** (all three support real CFG with a real negative branch). **Ignored** on `flux1-dev`, `fluxed-up`, and `qwen-rapid-aio` (all use `ConditioningZeroOut`) and `flux2-klein` (uses `BasicGuider` — no negative path). **Also accepted but unused** on `qwen-image-2.1`, which bakes `cfg=1`. |
-| `width` | integer | yes | 64 ≤ w ≤ 4096, **multiple of 16**. Qwen-Image 2.1 is natively 2K (2048×2048); sizes above that are still accepted but past the model's trained resolution. |
-| `height` | integer | yes | 64 ≤ h ≤ 4096, **multiple of 16**. |
+| `prompt` | string | yes | Non-empty. `prompt` + `negative_prompt` combined ≤ **32,000 characters**. This is a transport limit (64 KiB queue message), not a model one. |
+| `negative_prompt` | string | no | Shares the 32,000-character budget. Whether it reached the model is reported on the result as `render.negative_honored`. |
 | `seed` | integer | no | 64-bit unsigned. If omitted, the worker picks a random seed and returns it in the result so the run is reproducible. |
-| `steps` | integer | no | 1 ≤ steps ≤ 200. Default 20. Both Flux profiles work well at 20; `chroma1`'s recommended baseline is **26** (workable from 20 for iteration up to 35–50 for finer detail); `qwen-rapid-aio` is a 4-step distill — send **steps=4** (4–8 works); `qwen-image-2.1` follows the official pipeline's 40–50 (25 is a usable floor). |
-| `cfg` | number | no | 0.0 ≤ cfg ≤ 30.0. Default 7.0. **Honored on `chroma1`** (recommend 3.5; workable 3.5–7), **`qwen-image-2512`** (recommend 4.0), and **`openflux1`** (recommend ≈3.5). **Ignored** on `flux1-dev`, `flux2-klein`, `fluxed-up`, `qwen-rapid-aio`, and `qwen-image-2.1` (all guidance-distilled or pinned to cfg=1). |
+
+**Output size, step count, guidance scale and sampler are owned by the
+worker** and configured per profile in `azure_worker/profiles.toml`. The
+contract-v1 fields `width`, `height`, `steps` and `cfg` are accepted if sent,
+ignored, and listed in the result's `warnings`. The full v2 contract, with the
+profile table and migration notes, is
+`docs/superpowers/specs/2026-10-06-image-queue-contract-v2.md`.
 
 ### Example
 
@@ -138,17 +137,15 @@ A single JSON object:
   "job_id": "9c4f7e90-4f4a-4d6e-9b04-39d1b62b3a01",
   "name": "sunset-mountains",
   "prompt": "a serene sunset over snowy mountains, oil painting, dramatic lighting",
-  "width": 1024,
-  "height": 1024,
   "seed": 42
 }
 ```
 
 ### Validation failures
 
-If the message is unparseable JSON, missing a required field, has an
-out-of-range value, or has dimensions not aligned to 16, the worker:
-- Sends a result message with `status="error"` and a `error` string explaining what was wrong.
+If the message is unparseable JSON, missing a required field, over the
+prompt budget, or over 46 KiB of raw JSON, the worker:
+- Sends a result message with `status="error"` and an `error` string explaining what was wrong.
 - Deletes the inbound message (no retries).
 - Does not run the model.
 
@@ -168,14 +165,31 @@ whether to look at `blob_url` or `error`.
   "name": "string",
   "status": "success" | "error",
   "prompt": "string",
+  "negative_prompt": "string",
   "width": "integer",
   "height": "integer",
   "seed": "integer",
+  "render": "object | null",
+  "warnings": ["string"],
   "blob_url": "string | null",
   "blob_name": "string | null",
   "error": "string | null"
 }
 ```
+
+- `width` / `height` are the PNG's real dimensions (the graph's intended size
+  on a runtime error; `0` on a validation error). They are **not** an echo of
+  the request.
+- `render` describes what actually ran — model file, LoRA stack, steps, cfg,
+  sampler, scheduler, shift, whether the negative prompt was honored, and a
+  one-line `summary` — read back from the executed graph. It is `null` only
+  when validation failed before a graph was built. Field-by-field definition:
+  `docs/superpowers/specs/2026-10-06-image-queue-contract-v2.md` §4.
+- `warnings` is always an array, `[]` when empty. Today it carries
+  `"ignored client-supplied fields: ..."` for clients still sending v1 fields.
+- `seed` reflects the seed the worker actually used.
+- `blob_url` is a pre-signed read-only HTTPS URL, valid 24 hours. `blob_name`
+  is the path within the `generated-images` container.
 
 ### Success result
 
@@ -185,22 +199,28 @@ whether to look at `blob_url` or `error`.
   "name": "sunset-mountains",
   "status": "success",
   "prompt": "a serene sunset over snowy mountains, oil painting, dramatic lighting",
-  "width": 1024,
-  "height": 1024,
+  "negative_prompt": "",
+  "width": 2048,
+  "height": 2048,
   "seed": 42,
+  "render": {
+    "profile": "qwen-image-2.1",
+    "model": "qwen_image_2.1_int8_convrot.safetensors",
+    "loras": [],
+    "steps": 45,
+    "cfg": 1.0,
+    "sampler": "euler",
+    "scheduler": "simple",
+    "shift": 3.7169,
+    "negative_honored": false,
+    "summary": "qwen-image-2.1 · qwen_image_2.1_int8_convrot · 2048×2048 · 45 steps · cfg 1.0 · euler/simple"
+  },
+  "warnings": [],
   "blob_url": "https://nomadimagegen.blob.core.windows.net/generated-images/sunset-mountains/sunset-mountains_00001_.png?se=...&sig=...",
   "blob_name": "sunset-mountains/sunset-mountains_00001_.png",
   "error": null
 }
 ```
-
-- `blob_url` is a pre-signed read-only HTTPS URL. Valid for 24 hours from
-  generation. Download with a plain `GET`; no headers required.
-- `blob_name` is the path within the `generated-images` container, useful if
-  you authenticate to the blob service yourself and don't want the SAS.
-- `seed` reflects the seed the worker actually used — important if the request
-  omitted it.
-- `width` / `height` echo the request; the PNG is exactly those dimensions.
 
 ### Error result
 
@@ -210,9 +230,12 @@ whether to look at `blob_url` or `error`.
   "name": "sunset-mountains",
   "status": "error",
   "prompt": "a serene sunset over snowy mountains",
-  "width": 1024,
-  "height": 1024,
+  "negative_prompt": "",
+  "width": 2048,
+  "height": 2048,
   "seed": 42,
+  "render": { "profile": "qwen-image-2.1", "steps": 45, "...": "..." },
+  "warnings": [],
   "blob_url": null,
   "blob_name": null,
   "error": "workflow execution failed: [...]"
@@ -220,16 +243,16 @@ whether to look at `blob_url` or `error`.
 ```
 
 Common `error` messages:
-- `"'width'=99 must be a multiple of 16"` — validation failure
+- `"'prompt' + 'negative_prompt' total 32500 characters; the limit is 32000"` — validation failure
+- `"message is 48000 bytes; the limit is 47104 bytes"` — validation failure
 - `"'prompt' is required and must be a non-empty string"` — schema failure
 - `"workflow execution failed: ..."` — runtime failure inside ComfyUI (OOM, model load error, etc.)
 - `"workflow failed validation: ..."` — workflow couldn't even start
 - `"workflow %s did not complete within %ds"` — generation timed out (default 600s)
 
 If the original message was so malformed that no fields could be recovered,
-the error result has `job_id="unknown"`, `name="unknown"`, empty `prompt`,
-zeros for `width`/`height`/`seed`. Use `job_id="unknown"` as your signal that
-correlation is impossible for that one.
+the error result has `job_id="unknown"`, `name="unknown"`, empty prompts,
+`render: null`, and zeros for `width`/`height`/`seed`.
 
 ---
 
@@ -388,6 +411,12 @@ any absent-or-unknown-status as a failure.
 
 Removing or renaming a field, or changing the type/encoding of an existing
 field, requires a coordinated migration and a new spec version.
+
+Contract v2 (2026-10-06) removed `width`/`height`/`steps`/`cfg` from the
+request and added `negative_prompt`, `render` and `warnings` to the result.
+The removed request fields are still accepted and ignored, so a v1 producer
+keeps working against a v2 worker. A v2 producer against a v1 worker fails
+validation (v1 required `width`/`height`): **deploy the worker first.**
 
 ---
 

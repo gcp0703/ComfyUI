@@ -1,9 +1,7 @@
 {
-  "job_id": "11111111-2222-3333-4444-555555555555",
-  "name": "sunset-over-mountains",
+  "job_id": "9c4f7e90-4f4a-4d6e-9b04-39d1b62b3a01",
+  "name": "sunset-mountains",
   "prompt": "a serene sunset over snowy mountains, oil painting, dramatic lighting",
-  "width": 1024,
-  "height": 1024,
-  "seed": 42,
-  "steps": 20
+  "negative_prompt": "",
+  "seed": 42
 }

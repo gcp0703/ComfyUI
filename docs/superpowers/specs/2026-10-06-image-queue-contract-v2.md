@@ -167,7 +167,7 @@ sent, and none is needed.
   "cfg": 1.0,
   "sampler": "euler",
   "scheduler": "simple",
-  "shift": 1.9937,
+  "shift": 3.7169,
   "negative_honored": false,
   "summary": "qwen-image-2.1 · qwen_image_2.1_int8_convrot · 2048×2048 · 45 steps · cfg 1.0 · euler/simple"
 }
@@ -266,7 +266,7 @@ result is the authoritative record; never infer settings from the profile name.
     "cfg": 1.0,
     "sampler": "euler",
     "scheduler": "simple",
-    "shift": 1.9937,
+    "shift": 3.7169,
     "negative_honored": false,
     "summary": "qwen-image-2.1 · qwen_image_2.1_int8_convrot · 2048×2048 · 45 steps · cfg 1.0 · euler/simple"
   },
