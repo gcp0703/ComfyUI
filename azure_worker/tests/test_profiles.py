@@ -1,6 +1,7 @@
 """profiles.toml loading and validation (no GPU, no network)."""
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -69,7 +70,7 @@ def test_out_of_range_values_are_rejected(tmp_path, bad_line, needle):
     key = bad_line.split(" ")[0]
     base[key] = bad_line
     body = "[p]\n" + "\n".join(base.values()) + '\nsampler = "euler"\n'
-    with pytest.raises(ProfileError, match=needle):
+    with pytest.raises(ProfileError, match=re.escape(needle)):
         load_profiles(_write(tmp_path, body))
 
 
